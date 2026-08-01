@@ -343,6 +343,68 @@ class Rigify_spine_retarget(bpy.types.Operator):
 # if rigify rig was customized and bone names changed
 ## TODO: neck bone 1 instead of 2
 ## TODO: clear constrains when copying, and back to pose position
+
+
+def _select_objects(context, objects, active):
+    if context.object is not None and context.object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in objects:
+        obj.select_set(True)
+    context.view_layer.objects.active = active
+
+
+def _run_binding_operator(result, step_name):
+    if result != {'FINISHED'}:
+        raise RuntimeError(f"{step_name} was cancelled")
+
+
+def _new_armature(before_pointers, step_name):
+    created = [
+        obj for obj in bpy.data.objects
+        if obj.type == 'ARMATURE' and obj.as_pointer() not in before_pointers
+    ]
+    if len(created) != 1:
+        names = ", ".join(obj.name for obj in created) or "none"
+        raise RuntimeError(f"{step_name} created {len(created)} armatures: {names}")
+    return created[0]
+
+
+def bind_step1(context, rigify: bpy.types.Object):
+    """Run the existing ORG/MCH-copy operator for one Rigify armature."""
+    before_pointers = {obj.as_pointer() for obj in bpy.data.objects}
+    _select_objects(context, (rigify,), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig(), "Step 1")
+    return _new_armature(before_pointers, "Step 1")
+
+
+def bind_step2(context, rigify: bpy.types.Object, org_copy: bpy.types.Object):
+    """Run the existing driver-copy operator for an explicit object pair."""
+    before_pointers = {obj.as_pointer() for obj in bpy.data.objects}
+    _select_objects(context, (rigify, org_copy), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig2(), "Step 2")
+    return _new_armature(before_pointers, "Step 2")
+
+
+def bind_step3(context, rigify: bpy.types.Object, driver_copy: bpy.types.Object):
+    """Run the existing Rigify-controls operator for an explicit object pair."""
+    _select_objects(context, (rigify, driver_copy), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig3(), "Step 3")
+
+
+def bind_step4(context, org_copy: bpy.types.Object, mocap: bpy.types.Object):
+    """Run the existing Mocap-source operator with its expected object ordering."""
+    _select_objects(context, (org_copy, mocap), org_copy)
+    with context.temp_override(
+        object=org_copy,
+        active_object=org_copy,
+        selected_objects=[mocap, org_copy],
+        selected_editable_objects=[mocap, org_copy],
+    ):
+        result = bpy.ops.rigify_utils.copy_rig4()
+    _run_binding_operator(result, "Step 4")
+
+
 class Rigify_utils_Copy_rig(bpy.types.Operator):
     """Copy rigify rig, leave ORG and MCH bones. It should follow mocap rig"""
     bl_idname = "rigify_utils.copy_rig"
@@ -672,6 +734,10 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
                     con.use_offset = True # allows moving around
 
         bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        orig.select_set(True)
+        copy_org.select_set(True)
+        bpy.context.view_layer.objects.active = orig
         self.report({'INFO'}, f"Copied the rig")
         return {'FINISHED'}
 
@@ -801,6 +867,53 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
 
         bpy.ops.object.mode_set(mode='OBJECT')
         self.report({'INFO'}, f"{count} bindings added")
+        return {'FINISHED'}
+
+
+class Rigify_utils_Bind_rigify_to_mocap(bpy.types.Operator):
+    """Run all four binding steps for a selected Rigify and Mocap pair"""
+    bl_idname = "rigify_utils.bind_rigify_to_mocap"
+    bl_label = "Bind Rigify to Mocap"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = list(context.selected_objects)
+        armatures = [obj for obj in selected if obj.type == 'ARMATURE']
+        if len(selected) != 2 or len(armatures) != 2:
+            self.report({'ERROR'}, "Select exactly two armatures: Rigify and Mocap")
+            return {'CANCELLED'}
+
+        rigify_candidates = [
+            obj for obj in armatures
+            if obj.data.collections_all.find("Torso (Tweak)") != -1
+            and not obj.name.endswith("-copy")
+            and "-copy." not in obj.name
+        ]
+        mocap_candidates = [
+            obj for obj in armatures
+            if "Hips" in obj.pose.bones
+        ]
+        if len(rigify_candidates) != 1 or len(mocap_candidates) != 1:
+            self.report({'ERROR'}, "Could not identify one Rigify rig and one Mocap rig")
+            return {'CANCELLED'}
+
+        rigify = rigify_candidates[0]
+        mocap = mocap_candidates[0]
+        if rigify == mocap:
+            self.report({'ERROR'}, "Rigify and Mocap must be different armatures")
+            return {'CANCELLED'}
+
+        try:
+            org_copy = bind_step1(context, rigify)
+            driver_copy = bind_step2(context, rigify, org_copy)
+            bind_step3(context, rigify, driver_copy)
+            bind_step4(context, org_copy, mocap)
+        except Exception as error:
+            self.report({'ERROR'}, f"Binding failed: {error}")
+            return {'CANCELLED'}
+
+        _select_objects(context, (rigify, mocap), rigify)
+        self.report({'INFO'}, "Rigify successfully bound to Mocap")
         return {'FINISHED'}
 
 

@@ -112,15 +112,8 @@ class MOCAPTORIGIFY_PT_workflow(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
         armatures = selected_armatures(context)
         active_is_armature = active is not None and active.type == "ARMATURE"
         only_armatures_selected = len(context.selected_objects) == len(armatures)
-        step1_ready = active_is_armature and is_original_rigify(active)
-        step2_ready = only_armatures_selected and selection_is_pair(
-            armatures, is_original_rigify, is_org_copy
-        )
-        step3_ready = only_armatures_selected and selection_is_pair(
-            armatures, is_original_rigify, is_driver_copy
-        )
-        step4_ready = only_armatures_selected and selection_is_pair(
-            armatures, is_org_copy, is_mocap
+        bind_ready = only_armatures_selected and selection_is_pair(
+            armatures, is_original_rigify, is_mocap
         )
         has_org_copy, has_driver_copy = scene_pipeline_state(context)
 
@@ -136,6 +129,45 @@ class MOCAPTORIGIFY_PT_workflow(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
         progress.label(text="Scene Setup", icon="OUTLINER_OB_ARMATURE")
         draw_status(progress, "ORG/MCH copy", has_org_copy)
         draw_status(progress, "Driver copy", has_driver_copy)
+
+        binding = layout.box()
+        binding.label(text="One-click Binding", icon="LINKED")
+        action = binding.column()
+        action.enabled = bind_ready
+        action.scale_y = 1.4
+        action.operator(
+            "rigify_utils.bind_rigify_to_mocap",
+            text="Bind Rigify to Mocap",
+            icon="LINKED",
+        )
+        binding.label(
+            text="Select the original Rigify and Mocap armatures.",
+            icon="INFO",
+        )
+
+
+class MOCAPTORIGIFY_PT_debug_steps(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
+    bl_label = "Debug: Individual Steps"
+    bl_idname = "MOCAPTORIGIFY_PT_debug_steps"
+    bl_parent_id = "MOCAPTORIGIFY_PT_workflow"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        active = context.active_object
+        armatures = selected_armatures(context)
+        active_is_armature = active is not None and active.type == "ARMATURE"
+        only_armatures_selected = len(context.selected_objects) == len(armatures)
+        step1_ready = active_is_armature and is_original_rigify(active)
+        step2_ready = only_armatures_selected and selection_is_pair(
+            armatures, is_original_rigify, is_org_copy
+        )
+        step3_ready = only_armatures_selected and selection_is_pair(
+            armatures, is_original_rigify, is_driver_copy
+        )
+        step4_ready = only_armatures_selected and selection_is_pair(
+            armatures, is_org_copy, is_mocap
+        )
 
         draw_step(
             layout,
@@ -319,8 +351,10 @@ classes = (
     rigify.Rigify_utils_Copy_rig2,
     rigify.Rigify_utils_Copy_rig3,
     rigify.Rigify_utils_Copy_rig4,
+    rigify.Rigify_utils_Bind_rigify_to_mocap,
     rigify.MyAddonProperties,
     MOCAPTORIGIFY_PT_workflow,
+    MOCAPTORIGIFY_PT_debug_steps,
     MOCAPTORIGIFY_PT_corrections,
     MOCAPTORIGIFY_PT_mapping,
 )
