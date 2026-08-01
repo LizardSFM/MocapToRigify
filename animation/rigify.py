@@ -4,6 +4,206 @@ import bpy
 from bpy.props import StringProperty
 
 
+GENERATED_ROLE_KEY = "mocap_to_rigify_role"
+ROLE_COPY_ORG_MCH = "copy_org_mch"
+ROLE_DRIVER_COPY = "driver_copy"
+CONSTRAINT_ROTATION_NAME = "MocapToRigify Rotation"
+CONSTRAINT_HIPS_LOCATION_NAME = "MocapToRigify Hips Location"
+CONSTRAINT_DRIVER_ROTATION_NAME = "MocapToRigify Driver Rotation"
+CONSTRAINT_DRIVER_LOCATION_NAME = "MocapToRigify Driver Location"
+
+
+def has_bone_collection(obj, collection_name):
+    return obj.type == 'ARMATURE' and obj.data.collections_all.find(collection_name) != -1
+
+
+def selected_armatures(context, expected_count=2):
+    selected = list(context.selected_objects)
+    armatures = [obj for obj in selected if obj.type == 'ARMATURE']
+    if len(selected) != expected_count or len(armatures) != expected_count:
+        return None
+    return armatures
+
+
+def identify_mocap_and_copy(context):
+    armatures = selected_armatures(context)
+    if armatures is None:
+        return None, None, "Select exactly two armatures: the ORG/MCH copy and the Mocap rig"
+
+    copy_candidates = [
+        obj for obj in armatures
+        if obj.get(GENERATED_ROLE_KEY) == ROLE_COPY_ORG_MCH
+        or has_bone_collection(obj, "ORG-mocap")
+    ]
+    if len(copy_candidates) != 1:
+        return None, None, "Could not identify one Rigify *-copy-org-mch armature"
+
+    copy = copy_candidates[0]
+    mocap = armatures[0] if armatures[1] == copy else armatures[1]
+    if "Hips" not in mocap.pose.bones:
+        return None, None, f"{mocap.name} is missing the Mocap Fusion Hips bone"
+
+    return copy, mocap, None
+
+
+def identify_original_and_copy(context):
+    armatures = selected_armatures(context)
+    if armatures is None:
+        return None, None, "Select exactly two armatures: the original Rigify rig and its ORG/MCH copy"
+
+    copy_candidates = [
+        obj for obj in armatures
+        if obj.get(GENERATED_ROLE_KEY) == ROLE_COPY_ORG_MCH
+        or has_bone_collection(obj, "ORG-mocap")
+    ]
+    if len(copy_candidates) != 1:
+        return None, None, "Could not identify one Rigify ORG/MCH copy"
+
+    copy = copy_candidates[0]
+    original = armatures[0] if armatures[1] == copy else armatures[1]
+    if not has_bone_collection(original, "Torso (Tweak)"):
+        return None, None, f"{original.name} is not a generated Rigify armature"
+
+    return original, copy, None
+
+
+def identify_original_and_driver(context):
+    armatures = selected_armatures(context)
+    if armatures is None:
+        return None, None, "Select exactly two armatures: the original Rigify rig and its driver copy"
+
+    driver_candidates = [
+        obj for obj in armatures
+        if obj.get(GENERATED_ROLE_KEY) == ROLE_DRIVER_COPY
+    ]
+    if not driver_candidates:
+        driver_candidates = [
+            obj for obj in armatures
+            if obj.name.endswith("-copy") or "-copy." in obj.name
+        ]
+    if len(driver_candidates) != 1:
+        return None, None, "Could not identify one Rigify driver copy"
+
+    driver = driver_candidates[0]
+    original = armatures[0] if armatures[1] == driver else armatures[1]
+    if not has_bone_collection(original, "Torso (Tweak)"):
+        return None, None, f"{original.name} is not the original generated Rigify armature"
+
+    return original, driver, None
+
+
+def remove_pose_bone_constraints(pose_bone):
+    for constraint in list(pose_bone.constraints):
+        pose_bone.constraints.remove(constraint)
+
+
+def remove_driver_constraints(pose_bone, include_current_names=True):
+    current_names = {
+        CONSTRAINT_DRIVER_ROTATION_NAME,
+        CONSTRAINT_DRIVER_LOCATION_NAME,
+    }
+    for constraint in list(pose_bone.constraints):
+        is_legacy = constraint.name.endswith("-mocap2")
+        is_current = include_current_names and constraint.name in current_names
+        if is_legacy or is_current:
+            pose_bone.constraints.remove(constraint)
+
+
+def replace_target_constraint(pose_bone, constraint_type, name, target, subtarget):
+    matches = [
+        constraint for constraint in pose_bone.constraints
+        if constraint.name == name
+        or (
+            constraint.type == constraint_type
+            and getattr(constraint, "target", None) == target
+        )
+    ]
+
+    constraint = None
+    for candidate in matches:
+        if constraint is None and candidate.type == constraint_type:
+            constraint = candidate
+            continue
+        pose_bone.constraints.remove(candidate)
+
+    if constraint is None:
+        constraint = pose_bone.constraints.new(constraint_type)
+
+    constraint.name = name
+    constraint.target = target
+    constraint.subtarget = subtarget
+    constraint.influence = 1.0
+    constraint.mute = False
+    return constraint
+
+
+def rigify_spine_chain(obj, root_name):
+    root = obj.data.bones.get(root_name)
+    if root is None:
+        return []
+
+    chain = [root]
+    current = root
+    while True:
+        children = [
+            child for child in current.children
+            if child.name.startswith(f"{root_name}.")
+        ]
+        if len(children) != 1:
+            break
+        current = children[0]
+        chain.append(current)
+    return chain
+
+
+def mocap_spine_chain(obj, root_name="Hips"):
+    root = obj.data.bones.get(root_name)
+    if root is None:
+        return []
+
+    chain = [root]
+    current = root
+    while True:
+        children = [
+            child for child in current.children
+            if abs(child.head_local.x) < 0.001
+            and abs(child.tail_local.x) < 0.001
+            and not child.name.lower().endswith(("_end", ".end"))
+        ]
+        if len(children) != 1:
+            break
+        current = children[0]
+        chain.append(current)
+    return chain
+
+
+def normalized_chain_midpoints(chain):
+    lengths = [max(float(bone.length), 1e-8) for bone in chain]
+    total_length = sum(lengths)
+    distance = 0.0
+    midpoints = []
+    for length in lengths:
+        midpoints.append((distance + length * 0.5) / total_length)
+        distance += length
+    return midpoints
+
+
+def pair_spine_chains(rigify_chain, mocap_chain):
+    if not rigify_chain or not mocap_chain:
+        return []
+
+    rigify_positions = normalized_chain_midpoints(rigify_chain)
+    mocap_positions = normalized_chain_midpoints(mocap_chain)
+    pairs = []
+    for rigify_bone, position in zip(rigify_chain, rigify_positions):
+        index = min(
+            range(len(mocap_chain)),
+            key=lambda candidate: abs(mocap_positions[candidate] - position),
+        )
+        pairs.append((rigify_bone.name, mocap_chain[index].name))
+    return pairs
+
+
 # from mathutils import Vector, geometry
 class BONECONSTRAINTS_test(bpy.types.Operator):
     """Just test for debug"""
@@ -183,12 +383,11 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
         bpy.ops.object.posemode_toggle(True)
         bpy.ops.pose.select_all(action='DESELECT')
         # Select all bones in the first rig
-        for bone in copy.data.bones:
+        for bone in copy.pose.bones:
             bone.select = True
 
         bone_binds = {
             "ORG-shoulder.R" : "RightShoulder",
-            "ORG-upper_arm.R" : "RightShoulder",
             "ORG-upper_arm.R" : "RightArm",
             "ORG-forearm.R" : "RightForeArm",
             "ORG-hand.R" : "RightHand",
@@ -317,7 +516,7 @@ class Rigify_spine_retarget(bpy.types.Operator):
         bpy.ops.object.posemode_toggle(True)
         bpy.ops.pose.select_all(action='DESELECT')
         # Select all bones in the first rig
-        for bone in copy.data.bones:
+        for bone in copy.pose.bones:
             if bone.name in bones_pairs:
                 bone.select = True
         
@@ -421,7 +620,7 @@ class Rigify_utils_Copy_rig(bpy.types.Operator):
         # Clear constrains and Locks
         bpy.ops.object.posemode_toggle(True)
         for pose_bone in obj.pose.bones:
-            bpy.ops.pose.constraints_clear()
+            remove_pose_bone_constraints(pose_bone)
             pose_bone.lock_location[0] = False
             pose_bone.lock_location[1] = False
             pose_bone.lock_location[2] = False
@@ -432,8 +631,6 @@ class Rigify_utils_Copy_rig(bpy.types.Operator):
             pose_bone.lock_scale[0] = False
             pose_bone.lock_scale[1] = False
             pose_bone.lock_scale[2] = False
-        bpy.ops.pose.select_all(action='SELECT')
-        bpy.ops.pose.constraints_clear()
         bpy.ops.object.posemode_toggle(False)
 
         # Find center bones 
@@ -484,6 +681,7 @@ class Rigify_utils_Copy_rig(bpy.types.Operator):
 
         obj.data.pose_position = 'POSE'
         obj.name = orig_name + "-copy-org-mch"
+        obj[GENERATED_ROLE_KEY] = ROLE_COPY_ORG_MCH
         orig_obj.select_set(True)
         self.report({'INFO'}, f"Copied the rig")
         return {'FINISHED'}
@@ -499,16 +697,10 @@ class Rigify_utils_Copy_rig2(bpy.types.Operator):
     def execute(self, context):
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        if len(context.selected_objects) < 2:
-            self.report({'ERROR'}, "Select two armatures, one is Rigify copy, other is copy-org-mch")
+        orig, copy_org, error = identify_original_and_copy(context)
+        if error:
+            self.report({'ERROR'}, error)
             return {'CANCELLED'}
-        
-        
-        orig = context.selected_objects[0]
-        copy_org = context.selected_objects[1]
-        if orig.data.collections_all.find("Torso (Tweak)") == -1:
-            orig = context.selected_objects[1]
-            copy_org = context.selected_objects[0]
         
         # Duplicate rigify rig for attaching to copy-org-mch
         bpy.ops.object.select_all(action='DESELECT')
@@ -518,6 +710,9 @@ class Rigify_utils_Copy_rig2(bpy.types.Operator):
 
         copy = bpy.context.active_object
         copy.name = orig.name + "-copy"
+        copy[GENERATED_ROLE_KEY] = ROLE_DRIVER_COPY
+        for pose_bone in copy.pose.bones:
+            remove_driver_constraints(pose_bone)
 
         # Iterating over bones
         bpy.ops.object.posemode_toggle(True)
@@ -617,33 +812,22 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
     def execute(self, context):
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        if len(context.selected_objects) < 2:
-            self.report({'ERROR'}, "Select two armatures, one is original rig, other is its untouched copy")
+        orig, copy_org, error = identify_original_and_driver(context)
+        if error:
+            self.report({'ERROR'}, error)
             return {'CANCELLED'}
-        
-        
-        orig = context.selected_objects[0]
-        copy_org = context.selected_objects[1]
-        print(f"cond: {orig.name.endswith('-copy')}")
-        if orig.name.endswith("-copy"):
-            orig = context.selected_objects[1]
-            copy_org = context.selected_objects[0]
 
-        # grab pose bones
-        bpy.ops.object.select_all(action='DESELECT')
-        orig.select_set(True)
-        bpy.context.view_layer.objects.active = orig
-
-        # Iterating over bones
-        bpy.ops.object.posemode_toggle(True)
-        bpy.ops.pose.select_all(action='SELECT')
         props = context.scene.my_addon_props
         ikbones = [props.usr_torso, props.usr_hand_l, props.usr_hand_r, props.usr_foot_l, props.usr_foot_r]
-        for pose_bone in context.selected_pose_bones:
-            con = pose_bone.constraints.new('COPY_ROTATION')
-            con.name = con.name + "-mocap2"
-            con.target = copy_org
-            con.subtarget = pose_bone.name
+        for pose_bone in orig.pose.bones:
+            remove_driver_constraints(pose_bone, include_current_names=False)
+            con = replace_target_constraint(
+                pose_bone,
+                'COPY_ROTATION',
+                CONSTRAINT_DRIVER_ROTATION_NAME,
+                copy_org,
+                pose_bone.name,
+            )
             # con.target_space = 'LOCAL_OWNER_ORIENT'
             # con.target_space = 'LOCAL_WITH_PARENT'
             # con.owner_space = 'LOCAL_WITH_PARENT'
@@ -658,10 +842,13 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
                     con.target_space = 'LOCAL_WITH_PARENT'
                     con.owner_space = 'LOCAL_WITH_PARENT'
 
-                    con = pose_bone.constraints.new('COPY_LOCATION')
-                    con.name = con.name + "-mocap2"
-                    con.target = copy_org
-                    con.subtarget = pose_bone.name
+                    con = replace_target_constraint(
+                        pose_bone,
+                        'COPY_LOCATION',
+                        CONSTRAINT_DRIVER_LOCATION_NAME,
+                        copy_org,
+                        pose_bone.name,
+                    )
 
                     # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
                     con.target_space = 'LOCAL_WITH_PARENT'
@@ -671,7 +858,6 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
                     con.influence = 1.0
                     con.use_offset = True # allows moving around
 
-        bpy.ops.object.mode_set(mode='OBJECT')
         self.report({'INFO'}, f"Copied the rig")
         return {'FINISHED'}
 
@@ -683,124 +869,100 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        if len(context.selected_objects) < 2:
-            self.report({'ERROR'}, "Select two armatures, one is Rigify copy, other is mocap")
+        copy, mocap, error = identify_mocap_and_copy(context)
+        if error:
+            self.report({'ERROR'}, error)
             return {'CANCELLED'}
-        bpy.ops.object.mode_set(mode='OBJECT')
-        
-        copy = context.selected_objects[0]
-        mocap = context.selected_objects[1]
-        id = copy.data.collections_all.find("ORG")
-        if copy.data.collections_all.find("ORG") == -1:
-            copy = context.selected_objects[1]
-            mocap = context.selected_objects[0]
 
-        # Setting constrains
-        bpy.ops.object.posemode_toggle(True)
-        bpy.ops.pose.select_all(action='DESELECT')
-        # Select all bones in the first rig
-        for bone in copy.pose.bones:
-            bone.select = True
         props = context.scene.my_addon_props # Stored user inputs in UI
-        bone_binds = {
-            # props.org_shoulder_r : "RightShoulder",
-            props.org_upper_arm_r : "RightArm",
-            props.org_forearm_r : "RightForeArm",
-            props.org_hand_r : "RightHand",
-            props.org_thigh_r : "RightUpLeg",
-            props.org_shin_r : "RightLeg",
-            props.org_foot_r : "RightFoot",
-            props.org_toe_r : "RightToeBase",
+        bone_binds = [
+            (props.org_shoulder_r, "RightShoulder"),
+            (props.org_upper_arm_r, "RightArm"),
+            (props.org_forearm_r, "RightForeArm"),
+            (props.org_hand_r, "RightHand"),
+            (props.org_thigh_r, "RightUpLeg"),
+            (props.org_shin_r, "RightLeg"),
+            (props.org_foot_r, "RightFoot"),
+            (props.org_toe_r, "RightToeBase"),
+            (props.org_shoulder_l, "LeftShoulder"),
+            (props.org_upper_arm_l, "LeftArm"),
+            (props.org_forearm_l, "LeftForeArm"),
+            (props.org_hand_l, "LeftHand"),
+            (props.org_thigh_l, "LeftUpLeg"),
+            (props.org_shin_l, "LeftLeg"),
+            (props.org_foot_l, "LeftFoot"),
+            (props.org_toe_l, "LeftToeBase"),
+        ]
 
-            # "ORG-shoulder.L" : "LeftShoulder",
-            props.org_upper_arm_l : "LeftArm",
-            props.org_forearm_l : "LeftForeArm",
-            props.org_hand_l : "LeftHand",
-            props.org_thigh_l : "LeftUpLeg",
-            props.org_shin_l : "LeftLeg",
-            props.org_foot_l : "LeftFoot",
-            props.org_toe_r : "LeftToeBase",
+        duplicate_owner_names = sorted({
+            owner_name for owner_name, _ in bone_binds
+            if sum(1 for candidate, _ in bone_binds if candidate == owner_name) > 1
+        })
+        missing_owner = sorted({
+            owner_name for owner_name, _ in bone_binds
+            if not owner_name or owner_name not in copy.pose.bones
+        })
+        missing_target = sorted({
+            target_name for _, target_name in bone_binds
+            if target_name not in mocap.pose.bones
+        })
+        if duplicate_owner_names or missing_owner or missing_target:
+            details = []
+            if duplicate_owner_names:
+                details.append(f"duplicate Rigify fields: {', '.join(duplicate_owner_names)}")
+            if missing_owner:
+                details.append(f"missing on {copy.name}: {', '.join(missing_owner)}")
+            if missing_target:
+                details.append(f"missing on {mocap.name}: {', '.join(missing_target)}")
+            self.report({'ERROR'}, "; ".join(details))
+            return {'CANCELLED'}
 
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-        }
-        count = 0
-        for bone in context.selected_pose_bones:
-            if bone.name not in bone_binds:
-                continue
-            con = bone.constraints.new('COPY_ROTATION')
-            con.target = mocap
-            con.subtarget = bone_binds[bone.name]
+        rigify_chain = rigify_spine_chain(copy, props.org_spine)
+        mocap_chain = mocap_spine_chain(mocap)
+        if len(rigify_chain) < 2 or len(mocap_chain) < 2:
+            self.report({'ERROR'}, "Could not build Rigify and Mocap spine chains")
+            return {'CANCELLED'}
 
-            ## Local doesn't really work if rigify bones aren't straight
-            # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
-            # con.target_space = 'LOCAL_OWNER_ORIENT'
-            # con.owner_space = 'LOCAL'
-            # con.influence = 1.0
-            # con.mix_mode = 'AFTER'
-            count += 1
+        spine_pairs = pair_spine_chains(rigify_chain, mocap_chain)
 
-        # Hips location bind
-        for bone in context.selected_pose_bones:
-            if bone.name != "ORG-spine":
-                continue
-            con = bone.constraints.new('COPY_LOCATION')
-            con.target = mocap
-            con.subtarget = "Hips"
+        for owner_name, target_name in bone_binds:
+            replace_target_constraint(
+                copy.pose.bones[owner_name],
+                'COPY_ROTATION',
+                CONSTRAINT_ROTATION_NAME,
+                mocap,
+                target_name,
+            )
 
-            # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
-            con.target_space = 'LOCAL_OWNER_ORIENT'
-            con.owner_space = 'LOCAL'
-            con.influence = 1.0
-            con.use_offset = True # allows moving around
+        hips_bone = copy.pose.bones.get(props.org_spine)
+        if hips_bone is None:
+            self.report({'ERROR'}, f"Missing hips bone on {copy.name}: {props.org_spine}")
+            return {'CANCELLED'}
+        hips_location = replace_target_constraint(
+            hips_bone,
+            'COPY_LOCATION',
+            CONSTRAINT_HIPS_LOCATION_NAME,
+            mocap,
+            "Hips",
+        )
+        hips_location.target_space = 'LOCAL_OWNER_ORIENT'
+        hips_location.owner_space = 'LOCAL'
+        hips_location.use_offset = True
 
+        for owner_name, target_name in spine_pairs:
+            replace_target_constraint(
+                copy.pose.bones[owner_name],
+                'COPY_ROTATION',
+                CONSTRAINT_ROTATION_NAME,
+                mocap,
+                target_name,
+            )
 
-        
-        # SPINE BONES   
-        bpy.ops.object.editmode_toggle(True)
-        bpy.ops.armature.select_all(action='SELECT')
-
-        # Get center bones for copy rigify rig
-        bones_copy = find_centered_bones(copy.data.edit_bones)
-        bones_mocap = find_centered_bones(mocap.data.edit_bones)
-        bones_pairs = {}
-        for bone_copy in bones_copy:
-            if bone_copy.name == props.mch_torso: # Ignore
-                continue
-            closest_bone, closest_dist = find_closest_bone(bone_copy, bones_mocap)
-            bones_pairs[bone_copy.name] = [closest_bone.name, closest_dist]
-            self.report({'INFO'}, f"{bone_copy.name} - Closest: {closest_bone.name}, dist: {closest_dist:.4f}")
-        
-
-        bpy.ops.object.posemode_toggle(True)
-        bpy.ops.pose.select_all(action='DESELECT')
-        # Select all bones in the first rig
-        for bone in copy.pose.bones:
-            if bone.name in bones_pairs:
-                bone.select = True
-        
-        for bone in context.selected_pose_bones:
-        # for bone, pair in bones_pairs.items():
-            con = bone.constraints.new('COPY_ROTATION')
-            con.target = mocap
-            con.subtarget = bones_pairs[bone.name][0]
-
-            # copypaste
-            ## Local doesn't really work if rigify bones aren't straight
-            # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
-            # con.target_space = 'LOCAL_OWNER_ORIENT'
-            # con.owner_space = 'LOCAL'
-            # con.influence = 1.0
-            # con.mix_mode = 'AFTER'
-
-        bpy.ops.object.mode_set(mode='OBJECT')
-        self.report({'INFO'}, f"{count} bindings added")
+        copy[GENERATED_ROLE_KEY] = ROLE_COPY_ORG_MCH
+        self.report(
+            {'INFO'},
+            f"Bound {len(bone_binds)} limbs and {len(spine_pairs)} spine bones from {mocap.name}",
+        )
         return {'FINISHED'}
 
 

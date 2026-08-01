@@ -24,10 +24,10 @@ def store_constraints_from_bone(bone):
                         con_data[name] = value
                 except:
                     pass
-        if hasattr(con, 'target'):
-        # if con.target:
-            con_data["target_name"] = con.target.name
-            con_data["target_type"] = con.target.type
+        target = getattr(con, "target", None)
+        if target is not None:
+            con_data["target_name"] = target.name
+            con_data["target_type"] = target.type
         else:
             con_data["target_name"] = None
             con_data["target_type"] = None
@@ -62,10 +62,6 @@ def apply_constraints_to_bone(bone, bone_data):
                 except Exception as e:
                     print(e)
                     pass
-                try:
-                    con[key] = value
-                except:
-                    pass
 
 # ----------------------
 # Operators
@@ -83,8 +79,13 @@ class BONECONSTRAINTS_OT_store(bpy.types.Operator):
             self.report({'ERROR'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
+        selected_bones = context.selected_pose_bones or ()
+        if obj.mode != 'POSE' or not selected_bones:
+            self.report({'ERROR'}, "Select at least one bone in Pose Mode")
+            return {'CANCELLED'}
+
         storage = {}
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             storage[bone.name] = store_constraints_from_bone(bone)
 
         set_storage(context, storage)
@@ -109,8 +110,13 @@ class BONECONSTRAINTS_OT_apply(bpy.types.Operator):
             self.report({'ERROR'}, "No stored constraints found")
             return {'CANCELLED'}
 
+        selected_bones = context.selected_pose_bones or ()
+        if obj.mode != 'POSE' or not selected_bones:
+            self.report({'ERROR'}, "Select at least one bone in Pose Mode")
+            return {'CANCELLED'}
+
         count = 0
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             if bone.name in storage:
                 apply_constraints_to_bone(bone, storage[bone.name])
                 count += len(storage[bone.name])
@@ -131,9 +137,14 @@ class BONECONSTRAINTS_OT_keyframe_influence(bpy.types.Operator):
             self.report({'ERROR'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
+        selected_bones = context.selected_pose_bones or ()
+        if obj.mode != 'POSE' or not selected_bones:
+            self.report({'ERROR'}, "Select at least one bone in Pose Mode")
+            return {'CANCELLED'}
+
         frame = context.scene.frame_current
         count = 0
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             for con in bone.constraints:
                 try:
                     con.keyframe_insert("influence", frame=frame)
@@ -157,12 +168,17 @@ class BONECONSTRAINTS_OT_bake_and_remove(bpy.types.Operator):
             self.report({'ERROR'}, "Select an armature in Pose Mode")
             return {'CANCELLED'}
 
+        selected_bones = context.selected_pose_bones or ()
+        if obj.mode != 'POSE' or not selected_bones:
+            self.report({'ERROR'}, "Select at least one bone in Pose Mode")
+            return {'CANCELLED'}
+
         frame = context.scene.frame_current
         baked = 0
 
         # Step 1: store constraints
         stored = {}
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             stored[bone.name] = store_constraints_from_bone(bone)
 
         # Step 2: bake single keyframe with Blender’s built-in operator
@@ -177,12 +193,12 @@ class BONECONSTRAINTS_OT_bake_and_remove(bpy.types.Operator):
         )
 
         # Step 3: reapply stored constraints
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             if bone.name in stored:
                 apply_constraints_to_bone(bone, stored[bone.name])
 
         # Step 4: set influence to 0 and keyframe it
-        for bone in context.selected_pose_bones:
+        for bone in selected_bones:
             for con in bone.constraints:
                 con.influence = 0.0
                 try:
