@@ -584,11 +584,12 @@ class Rigify_utils_Copy_rig2(bpy.types.Operator):
 
         bpy.ops.object.mode_set(mode='POSE')
         bpy.ops.pose.select_all(action='DESELECT')
-
+        
         # Now attaching
         for pose_bone in spine_fk:
             bone = pose_bone.bone
-            bone.select = True
+            pose_bone.select = True
+            print(pose_bone, pose_bone.select)
             for center_pose_bone in center_bones:
                 center_bone = center_pose_bone.bone
                 if (bone.head_local - center_bone.tail_local).length <= 0.0001:
@@ -698,7 +699,7 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         bpy.ops.object.posemode_toggle(True)
         bpy.ops.pose.select_all(action='DESELECT')
         # Select all bones in the first rig
-        for bone in copy.data.bones:
+        for bone in copy.pose.bones:
             bone.select = True
         props = context.scene.my_addon_props # Stored user inputs in UI
         bone_binds = {
@@ -780,7 +781,7 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         bpy.ops.object.posemode_toggle(True)
         bpy.ops.pose.select_all(action='DESELECT')
         # Select all bones in the first rig
-        for bone in copy.data.bones:
+        for bone in copy.pose.bones:
             if bone.name in bones_pairs:
                 bone.select = True
         
