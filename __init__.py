@@ -54,7 +54,8 @@ def is_driver_copy(obj):
 
 
 def is_mocap(obj):
-    return obj.type == "ARMATURE" and "Hips" in obj.pose.bones
+    return obj.type == "ARMATURE" # Temp disable checking hips
+    # return obj.type == "ARMATURE" and "Hips" in obj.pose.bones
 
 
 def selection_is_pair(armatures, first_test, second_test):

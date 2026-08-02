@@ -4,6 +4,19 @@ import bpy
 from bpy.props import StringProperty
 
 
+def resolve_subtarget(armature, candidates):
+    """Given a bone name or list of candidate names, return the first one that
+    exists in armature.pose.bones, else None. Accepts both old-style single
+    strings and new-style lists of names so one binding table can target
+    multiple mocap rigs (Mocap Fusion, VRM, etc.)."""
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    for name in candidates:
+        if name and name in armature.pose.bones:
+            return name
+    return None
+
+
 # from mathutils import Vector, geometry
 class BONECONSTRAINTS_test(bpy.types.Operator):
     """Just test for debug"""
@@ -187,25 +200,24 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             bone.select = True
 
         bone_binds = {
-            "ORG-shoulder.R" : "RightShoulder",
-            "ORG-upper_arm.R" : "RightShoulder",
-            "ORG-upper_arm.R" : "RightArm",
-            "ORG-forearm.R" : "RightForeArm",
-            "ORG-hand.R" : "RightHand",
-            "ORG-thigh.R" : "RightUpLeg",
-            "ORG-shin.R" : "RightLeg",
-            "ORG-foot.R" : "RightFoot",
-            "ORG-toe.R" : "RightToeBase",
+            "ORG-shoulder.R" : ["RightShoulder", "J_Bip_R_Shoulder"],
+            "ORG-upper_arm.R" : ["RightArm", "J_Bip_R_UpperArm"],
+            "ORG-forearm.R" : ["RightForeArm", "J_Bip_R_LowerArm"],
+            "ORG-hand.R" : ["RightHand", "J_Bip_R_Hand"],
+            "ORG-thigh.R" : ["RightUpLeg", "J_Bip_R_UpperLeg"],
+            "ORG-shin.R" : ["RightLeg", "J_Bip_R_LowerLeg"],
+            "ORG-foot.R" : ["RightFoot", "J_Bip_R_Foot"],
+            "ORG-toe.R" : ["RightToeBase", "J_Bip_R_ToeBase"],
 
-            "ORG-shoulder.L" : "LeftShoulder",
-            "ORG-upper_arm.L" : "LeftArm",
-            "ORG-forearm.L" : "LeftForeArm",
-            "ORG-hand.L" : "LeftHand",
-            "ORG-thigh.L" : "LeftUpLeg",
-            "ORG-shin.L" : "LeftLeg",
-            "ORG-foot.L" : "LeftFoot",
-            "ORG-toe.L" : "LeftToeBase",
-
+            "ORG-shoulder.L" : ["LeftShoulder", "J_Bip_L_Shoulder"],
+            "ORG-upper_arm.L" : ["LeftArm", "J_Bip_L_UpperArm"],
+            "ORG-forearm.L" : ["LeftForeArm", "J_Bip_L_LowerArm"],
+            "ORG-hand.L" : ["LeftHand", "J_Bip_L_Hand"],
+            "ORG-thigh.L" : ["LeftUpLeg", "J_Bip_L_UpperLeg"],
+            "ORG-shin.L" : ["LeftLeg", "J_Bip_L_LowerLeg"],
+            "ORG-foot.L" : ["LeftFoot", "J_Bip_L_Foot"],
+            "ORG-toe.L" : ["LeftToeBase", "J_Bip_L_ToeBase"],
+            
             "" : "",
             "" : "",
             "" : "",
@@ -216,12 +228,17 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             "" : "",
         }
         count = 0
+        skipped = 0
         for bone in context.selected_pose_bones:
             if bone.name not in bone_binds:
                 continue
+            target_name = resolve_subtarget(mocap, bone_binds[bone.name])
+            if target_name is None:
+                skipped += 1
+                continue
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bone_binds[bone.name]
+            con.subtarget = target_name
 
             ## Local doesn't really work if rigify bones aren't straight
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
@@ -232,14 +249,21 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             
             print(con)
             count += 1
+        if skipped:
+            self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
+        hips_candidates = ["Hips", "J_Bip_Hips", "hips", "Hip"]
+        hips_name = resolve_subtarget(mocap, hips_candidates)
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
+            if hips_name is None:
+                self.report({'WARNING'}, "No 'Hips' bone found in mocap rig")
+                break
             con = bone.constraints.new('COPY_LOCATION')
             con.target = mocap
-            con.subtarget = "Hips"
+            con.subtarget = hips_name
 
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
             con.target_space = 'LOCAL_OWNER_ORIENT'
@@ -769,40 +793,36 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
             bone.select = True
         props = context.scene.my_addon_props # Stored user inputs in UI
         bone_binds = {
-            # props.org_shoulder_r : "RightShoulder",
-            props.org_upper_arm_r : "RightArm",
-            props.org_forearm_r : "RightForeArm",
-            props.org_hand_r : "RightHand",
-            props.org_thigh_r : "RightUpLeg",
-            props.org_shin_r : "RightLeg",
-            props.org_foot_r : "RightFoot",
-            props.org_toe_r : "RightToeBase",
+            # props.org_shoulder_r : ["RightShoulder", "J_Bip_R_Shoulder"],
+            props.org_upper_arm_r : ["RightArm", "J_Bip_R_UpperArm"],
+            props.org_forearm_r : ["RightForeArm", "J_Bip_R_LowerArm"],
+            props.org_hand_r : ["RightHand", "J_Bip_R_Hand"],
+            props.org_thigh_r : ["RightUpLeg", "J_Bip_R_UpperLeg"],
+            props.org_shin_r : ["RightLeg", "J_Bip_R_LowerLeg"],
+            props.org_foot_r : ["RightFoot", "J_Bip_R_Foot"],
+            props.org_toe_r : ["RightToeBase", "J_Bip_R_ToeBase"],
 
-            # "ORG-shoulder.L" : "LeftShoulder",
-            props.org_upper_arm_l : "LeftArm",
-            props.org_forearm_l : "LeftForeArm",
-            props.org_hand_l : "LeftHand",
-            props.org_thigh_l : "LeftUpLeg",
-            props.org_shin_l : "LeftLeg",
-            props.org_foot_l : "LeftFoot",
-            props.org_toe_r : "LeftToeBase",
-
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
+            # props.org_shoulder_l : ["LeftShoulder", "J_Bip_L_Shoulder"],
+            props.org_upper_arm_l : ["LeftArm", "J_Bip_L_UpperArm"],
+            props.org_forearm_l : ["LeftForeArm", "J_Bip_L_LowerArm"],
+            props.org_hand_l : ["LeftHand", "J_Bip_L_Hand"],
+            props.org_thigh_l : ["LeftUpLeg", "J_Bip_L_UpperLeg"],
+            props.org_shin_l : ["LeftLeg", "J_Bip_L_LowerLeg"],
+            props.org_foot_l : ["LeftFoot", "J_Bip_L_Foot"],
+            props.org_toe_l : ["LeftToeBase", "J_Bip_L_ToeBase"],
         }
         count = 0
+        skipped = 0
         for bone in context.selected_pose_bones:
             if bone.name not in bone_binds:
                 continue
+            target_name = resolve_subtarget(mocap, bone_binds[bone.name])
+            if target_name is None:
+                skipped += 1
+                continue
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bone_binds[bone.name]
+            con.subtarget = target_name
 
             ## Local doesn't really work if rigify bones aren't straight
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
@@ -811,14 +831,21 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
             # con.influence = 1.0
             # con.mix_mode = 'AFTER'
             count += 1
+        if skipped:
+            self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
+        hips_candidates = ["Hips", "J_Bip_Hips", "hips", "Hip"]
+        hips_name = resolve_subtarget(mocap, hips_candidates)
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
+            if hips_name is None:
+                self.report({'WARNING'}, "No 'Hips' bone found in mocap rig")
+                break
             con = bone.constraints.new('COPY_LOCATION')
             con.target = mocap
-            con.subtarget = "Hips"
+            con.subtarget = hips_name
 
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
             con.target_space = 'LOCAL_OWNER_ORIENT'
