@@ -319,6 +319,35 @@ def find_closest_bone(current_bone, other_bones):
 
     return closest_bone, closest_dist
 
+
+def pair_spines_by_ratio(copy_bones, mocap_bones):
+    """Match spine bones by normalized Z-ratio (0.0 = hips, 1.0 = head) so rigs
+    of different overall heights pair correctly. Returns {copy_name: mocap_name}.
+    Assumes both lists come from find_centered_bones (already Z-sorted)."""
+    if not copy_bones or not mocap_bones:
+        return {}
+    copy_z_min = copy_bones[0].head.z
+    copy_z_max = copy_bones[-1].head.z
+    mocap_z_min = mocap_bones[0].head.z
+    mocap_z_max = mocap_bones[-1].head.z
+    copy_spine_len = copy_z_max - copy_z_min
+    mocap_spine_len = mocap_z_max - mocap_z_min
+    pairs = {}
+    for cb in copy_bones:
+        cb_ratio = (cb.head.z - copy_z_min) / copy_spine_len if copy_spine_len > 1e-5 else 0.0
+        best = None
+        best_delta = float('inf')
+        for mb in mocap_bones:
+            mb_ratio = (mb.head.z - mocap_z_min) / mocap_spine_len if mocap_spine_len > 1e-5 else 0.0
+            delta = abs(mb_ratio - cb_ratio)
+            if delta < best_delta:
+                best_delta = delta
+                best = mb
+        if best is not None:
+            pairs[cb.name] = best.name
+    return pairs
+
+
 # TODO: Ignore MCH-torso.parent from copy rotation
 class Rigify_spine_retarget(bpy.types.Operator):
     """Find spine bones close to other rig's spine bones, and retarget"""
@@ -345,12 +374,9 @@ class Rigify_spine_retarget(bpy.types.Operator):
         # Get center bones for copy rigify rig
         bones_copy = find_centered_bones(copy.data.edit_bones)
         bones_mocap = find_centered_bones(mocap.data.edit_bones)
-        bones_pairs = {}
-        for bone_copy in bones_copy:
-            closest_bone, closest_dist = find_closest_bone(bone_copy, bones_mocap)
-            bones_pairs[bone_copy.name] = [closest_bone.name, closest_dist]
-            self.report({'INFO'}, f"{bone_copy.name} - Closest: {closest_bone.name}, dist: {closest_dist:.4f}")
-        
+        bones_pairs = pair_spines_by_ratio(bones_copy, bones_mocap)
+        for copy_name, mocap_name in bones_pairs.items():
+            self.report({'INFO'}, f"{copy_name} -> {mocap_name}")
 
 
         bpy.ops.object.posemode_toggle(True)
@@ -359,12 +385,12 @@ class Rigify_spine_retarget(bpy.types.Operator):
         for bone in copy.data.bones:
             if bone.name in bones_pairs:
                 bone.select = True
-        
+
         for bone in context.selected_pose_bones:
         # for bone, pair in bones_pairs.items():
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bones_pairs[bone.name][0]
+            con.subtarget = bones_pairs[bone.name]
 
             # copypaste
             ## Local doesn't really work if rigify bones aren't straight
@@ -915,14 +941,11 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         # Get center bones for copy rigify rig
         bones_copy = find_centered_bones(copy.data.edit_bones)
         bones_mocap = find_centered_bones(mocap.data.edit_bones)
-        bones_pairs = {}
-        for bone_copy in bones_copy:
-            if bone_copy.name == props.mch_torso: # Ignore
-                continue
-            closest_bone, closest_dist = find_closest_bone(bone_copy, bones_mocap)
-            bones_pairs[bone_copy.name] = [closest_bone.name, closest_dist]
-            self.report({'INFO'}, f"{bone_copy.name} - Closest: {closest_bone.name}, dist: {closest_dist:.4f}")
-        
+        bones_pairs = pair_spines_by_ratio(bones_copy, bones_mocap)
+        if props.mch_torso in bones_pairs:
+            del bones_pairs[props.mch_torso]  # Ignore torso parent
+        for copy_name, mocap_name in bones_pairs.items():
+            self.report({'INFO'}, f"{copy_name} -> {mocap_name}")
 
         bpy.ops.object.posemode_toggle(True)
         bpy.ops.pose.select_all(action='DESELECT')
@@ -935,7 +958,7 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         # for bone, pair in bones_pairs.items():
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bones_pairs[bone.name][0]
+            con.subtarget = bones_pairs[bone.name]
 
             # copypaste
             ## Local doesn't really work if rigify bones aren't straight
