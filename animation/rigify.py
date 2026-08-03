@@ -17,6 +17,17 @@ def resolve_subtarget(armature, candidates):
     return None
 
 
+def find_root_bone(armature):
+    """Return the name of the root bone (no parent) of an armature, else None.
+    Used as a fallback for hips when no candidate name matches — in a typical
+    humanoid hierarchy the root bone is the hips/pelvis. Uses data.bones
+    because pose.bones doesn't expose .parent reliably across Blender versions."""
+    for bone in armature.data.bones:
+        if bone.parent is None:
+            return bone.name
+    return None
+
+
 # from mathutils import Vector, geometry
 class BONECONSTRAINTS_test(bpy.types.Operator):
     """Just test for debug"""
@@ -253,8 +264,12 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
-        hips_candidates = ["Hips", "J_Bip_Hips", "hips", "Hip"]
+        hips_candidates = ["Hips", "J_Bip_C_Hips", "hips", "Hip"]
         hips_name = resolve_subtarget(mocap, hips_candidates)
+        if hips_name is None:
+            hips_name = find_root_bone(mocap)
+            if hips_name:
+                self.report({'INFO'}, f"No hips candidate matched; using root bone '{hips_name}'")
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
@@ -869,8 +884,12 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
             self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
-        hips_candidates = ["Hips", "J_Bip_Hips", "hips", "Hip"]
+        hips_candidates = ["Hips", "J_Bip_C_Hips", "hips", "Hip"]
         hips_name = resolve_subtarget(mocap, hips_candidates)
+        if hips_name is None:
+            hips_name = find_root_bone(mocap)
+            if hips_name:
+                self.report({'INFO'}, f"No hips candidate matched; using root bone '{hips_name}'")
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
@@ -889,7 +908,7 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
 
 
         
-        # SPINE BONES   
+        # SPINE BONES
         bpy.ops.object.editmode_toggle(True)
         bpy.ops.armature.select_all(action='SELECT')
 
