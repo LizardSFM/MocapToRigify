@@ -446,6 +446,8 @@ class Rigify_spine_retarget(bpy.types.Operator):
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
             con.subtarget = bones_pairs[bone.name]
+            con.target_space = 'LOCAL_OWNER_ORIENT'
+            con.owner_space = 'LOCAL'
 
             # copypaste
             ## Local doesn't really work if rigify bones aren't straight
@@ -1021,11 +1023,15 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
                     con.target = mocap
                     con.subtarget = mocap_name
                     con.influence = weight
+                    con.target_space = 'LOCAL_OWNER_ORIENT'
+                    con.owner_space = 'LOCAL'
             else:
                 # Single 1:1 match (value is a mocap bone name string)
                 con = bone.constraints.new('COPY_ROTATION')
                 con.target = mocap
                 con.subtarget = value
+                con.target_space = 'LOCAL_OWNER_ORIENT'
+                con.owner_space = 'LOCAL'
 
             # copypaste
             ## Local doesn't really work if rigify bones aren't straight
