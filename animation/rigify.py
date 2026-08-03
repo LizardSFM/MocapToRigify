@@ -4,6 +4,30 @@ import bpy
 from bpy.props import StringProperty
 
 
+def resolve_subtarget(armature, candidates):
+    """Given a bone name or list of candidate names, return the first one that
+    exists in armature.pose.bones, else None. Accepts both old-style single
+    strings and new-style lists of names so one binding table can target
+    multiple mocap rigs (Mocap Fusion, VRM, etc.)."""
+    if isinstance(candidates, str):
+        candidates = [candidates]
+    for name in candidates:
+        if name and name in armature.pose.bones:
+            return name
+    return None
+
+
+def find_root_bone(armature):
+    """Return the name of the root bone (no parent) of an armature, else None.
+    Used as a fallback for hips when no candidate name matches — in a typical
+    humanoid hierarchy the root bone is the hips/pelvis. Uses data.bones
+    because pose.bones doesn't expose .parent reliably across Blender versions."""
+    for bone in armature.data.bones:
+        if bone.parent is None:
+            return bone.name
+    return None
+
+
 # from mathutils import Vector, geometry
 class BONECONSTRAINTS_test(bpy.types.Operator):
     """Just test for debug"""
@@ -187,25 +211,24 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             bone.select = True
 
         bone_binds = {
-            "ORG-shoulder.R" : "RightShoulder",
-            "ORG-upper_arm.R" : "RightShoulder",
-            "ORG-upper_arm.R" : "RightArm",
-            "ORG-forearm.R" : "RightForeArm",
-            "ORG-hand.R" : "RightHand",
-            "ORG-thigh.R" : "RightUpLeg",
-            "ORG-shin.R" : "RightLeg",
-            "ORG-foot.R" : "RightFoot",
-            "ORG-toe.R" : "RightToeBase",
+            "ORG-shoulder.R" : ["RightShoulder", "J_Bip_R_Shoulder"],
+            "ORG-upper_arm.R" : ["RightArm", "J_Bip_R_UpperArm"],
+            "ORG-forearm.R" : ["RightForeArm", "J_Bip_R_LowerArm"],
+            "ORG-hand.R" : ["RightHand", "J_Bip_R_Hand"],
+            "ORG-thigh.R" : ["RightUpLeg", "J_Bip_R_UpperLeg"],
+            "ORG-shin.R" : ["RightLeg", "J_Bip_R_LowerLeg"],
+            "ORG-foot.R" : ["RightFoot", "J_Bip_R_Foot"],
+            "ORG-toe.R" : ["RightToeBase", "J_Bip_R_ToeBase"],
 
-            "ORG-shoulder.L" : "LeftShoulder",
-            "ORG-upper_arm.L" : "LeftArm",
-            "ORG-forearm.L" : "LeftForeArm",
-            "ORG-hand.L" : "LeftHand",
-            "ORG-thigh.L" : "LeftUpLeg",
-            "ORG-shin.L" : "LeftLeg",
-            "ORG-foot.L" : "LeftFoot",
-            "ORG-toe.L" : "LeftToeBase",
-
+            "ORG-shoulder.L" : ["LeftShoulder", "J_Bip_L_Shoulder"],
+            "ORG-upper_arm.L" : ["LeftArm", "J_Bip_L_UpperArm"],
+            "ORG-forearm.L" : ["LeftForeArm", "J_Bip_L_LowerArm"],
+            "ORG-hand.L" : ["LeftHand", "J_Bip_L_Hand"],
+            "ORG-thigh.L" : ["LeftUpLeg", "J_Bip_L_UpperLeg"],
+            "ORG-shin.L" : ["LeftLeg", "J_Bip_L_LowerLeg"],
+            "ORG-foot.L" : ["LeftFoot", "J_Bip_L_Foot"],
+            "ORG-toe.L" : ["LeftToeBase", "J_Bip_L_ToeBase"],
+            
             "" : "",
             "" : "",
             "" : "",
@@ -216,12 +239,17 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             "" : "",
         }
         count = 0
+        skipped = 0
         for bone in context.selected_pose_bones:
             if bone.name not in bone_binds:
                 continue
+            target_name = resolve_subtarget(mocap, bone_binds[bone.name])
+            if target_name is None:
+                skipped += 1
+                continue
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bone_binds[bone.name]
+            con.subtarget = target_name
 
             ## Local doesn't really work if rigify bones aren't straight
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
@@ -232,14 +260,25 @@ class BONECONSTRAINTS_OT_Copy_to_mocap_constrains(bpy.types.Operator):
             
             print(con)
             count += 1
+        if skipped:
+            self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
+        hips_candidates = ["Hips", "J_Bip_C_Hips", "hips", "Hip"]
+        hips_name = resolve_subtarget(mocap, hips_candidates)
+        if hips_name is None:
+            hips_name = find_root_bone(mocap)
+            if hips_name:
+                self.report({'INFO'}, f"No hips candidate matched; using root bone '{hips_name}'")
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
+            if hips_name is None:
+                self.report({'WARNING'}, "No 'Hips' bone found in mocap rig")
+                break
             con = bone.constraints.new('COPY_LOCATION')
             con.target = mocap
-            con.subtarget = "Hips"
+            con.subtarget = hips_name
 
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
             con.target_space = 'LOCAL_OWNER_ORIENT'
@@ -343,6 +382,68 @@ class Rigify_spine_retarget(bpy.types.Operator):
 # if rigify rig was customized and bone names changed
 ## TODO: neck bone 1 instead of 2
 ## TODO: clear constrains when copying, and back to pose position
+
+
+def _select_objects(context, objects, active):
+    if context.object is not None and context.object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in objects:
+        obj.select_set(True)
+    context.view_layer.objects.active = active
+
+
+def _run_binding_operator(result, step_name):
+    if result != {'FINISHED'}:
+        raise RuntimeError(f"{step_name} was cancelled")
+
+
+def _new_armature(before_pointers, step_name):
+    created = [
+        obj for obj in bpy.data.objects
+        if obj.type == 'ARMATURE' and obj.as_pointer() not in before_pointers
+    ]
+    if len(created) != 1:
+        names = ", ".join(obj.name for obj in created) or "none"
+        raise RuntimeError(f"{step_name} created {len(created)} armatures: {names}")
+    return created[0]
+
+
+def bind_step1(context, rigify: bpy.types.Object):
+    """Run the existing ORG/MCH-copy operator for one Rigify armature."""
+    before_pointers = {obj.as_pointer() for obj in bpy.data.objects}
+    _select_objects(context, (rigify,), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig(), "Step 1")
+    return _new_armature(before_pointers, "Step 1")
+
+
+def bind_step2(context, rigify: bpy.types.Object, org_copy: bpy.types.Object):
+    """Run the existing driver-copy operator for an explicit object pair."""
+    before_pointers = {obj.as_pointer() for obj in bpy.data.objects}
+    _select_objects(context, (rigify, org_copy), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig2(), "Step 2")
+    return _new_armature(before_pointers, "Step 2")
+
+
+def bind_step3(context, rigify: bpy.types.Object, driver_copy: bpy.types.Object):
+    """Run the existing Rigify-controls operator for an explicit object pair."""
+    _select_objects(context, (rigify, driver_copy), rigify)
+    _run_binding_operator(bpy.ops.rigify_utils.copy_rig3(), "Step 3")
+
+
+def bind_step4(context, org_copy: bpy.types.Object, mocap: bpy.types.Object):
+    """Run the existing Mocap-source operator with its expected object ordering."""
+    _select_objects(context, (org_copy, mocap), org_copy)
+    with context.temp_override(
+        object=org_copy,
+        active_object=org_copy,
+        selected_objects=[mocap, org_copy],
+        selected_editable_objects=[mocap, org_copy],
+    ):
+        result = bpy.ops.rigify_utils.copy_rig4()
+    _run_binding_operator(result, "Step 4")
+
+
 class Rigify_utils_Copy_rig(bpy.types.Operator):
     """Copy rigify rig, leave ORG and MCH bones. It should follow mocap rig"""
     bl_idname = "rigify_utils.copy_rig"
@@ -671,7 +772,45 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
                     con.influence = 1.0
                     con.use_offset = True # allows moving around
 
+        # Damped Track constraints on the driver copy's IK bones,
+        # pointing at the ORG bones on the *-copy-org-mch rig so elbows/knees
+        # aim toward the mocap-driven child bones.
+        copy_org_mch_name = copy_org.name.replace("-copy", "-copy-org-mch", 1)
+        copy_org_mch = bpy.data.objects.get(copy_org_mch_name)
+        if copy_org_mch is None:
+            self.report({'WARNING'}, f"Damped Track: could not find '{copy_org_mch_name}'")
+        else:
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            copy_org.select_set(True)
+            bpy.context.view_layer.objects.active = copy_org
+            bpy.ops.object.posemode_toggle(True)
+
+            damped_track_binds = {
+                props.usr_upper_arm_r: props.org_forearm_r,
+                props.usr_upper_arm_l: props.org_forearm_l,
+                props.usr_thigh_r:     props.org_shin_r,
+                props.usr_thigh_l:     props.org_shin_l,
+            }
+            for ik_bone_name, org_target_name in damped_track_binds.items():
+                if not ik_bone_name or not org_target_name:
+                    continue
+                pbone = copy_org.pose.bones.get(ik_bone_name)
+                if pbone is None:
+                    self.report({'WARNING'}, f"Damped Track: '{ik_bone_name}' not found on {copy_org.name}")
+                    continue
+                con = pbone.constraints.new('DAMPED_TRACK')
+                con.name = con.name + "-damped"
+                con.target = copy_org_mch
+                con.subtarget = org_target_name
+                con.head_tail = 0.0
+                con.track_axis = 'TRACK_NEGATIVE_Z'
+
         bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        orig.select_set(True)
+        copy_org.select_set(True)
+        bpy.context.view_layer.objects.active = orig
         self.report({'INFO'}, f"Copied the rig")
         return {'FINISHED'}
 
@@ -703,40 +842,36 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
             bone.select = True
         props = context.scene.my_addon_props # Stored user inputs in UI
         bone_binds = {
-            # props.org_shoulder_r : "RightShoulder",
-            props.org_upper_arm_r : "RightArm",
-            props.org_forearm_r : "RightForeArm",
-            props.org_hand_r : "RightHand",
-            props.org_thigh_r : "RightUpLeg",
-            props.org_shin_r : "RightLeg",
-            props.org_foot_r : "RightFoot",
-            props.org_toe_r : "RightToeBase",
+            # props.org_shoulder_r : ["RightShoulder", "J_Bip_R_Shoulder"],
+            props.org_upper_arm_r : ["RightArm", "J_Bip_R_UpperArm"],
+            props.org_forearm_r : ["RightForeArm", "J_Bip_R_LowerArm"],
+            props.org_hand_r : ["RightHand", "J_Bip_R_Hand"],
+            props.org_thigh_r : ["RightUpLeg", "J_Bip_R_UpperLeg"],
+            props.org_shin_r : ["RightLeg", "J_Bip_R_LowerLeg"],
+            props.org_foot_r : ["RightFoot", "J_Bip_R_Foot"],
+            props.org_toe_r : ["RightToeBase", "J_Bip_R_ToeBase"],
 
-            # "ORG-shoulder.L" : "LeftShoulder",
-            props.org_upper_arm_l : "LeftArm",
-            props.org_forearm_l : "LeftForeArm",
-            props.org_hand_l : "LeftHand",
-            props.org_thigh_l : "LeftUpLeg",
-            props.org_shin_l : "LeftLeg",
-            props.org_foot_l : "LeftFoot",
-            props.org_toe_r : "LeftToeBase",
-
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
-            "" : "",
+            # props.org_shoulder_l : ["LeftShoulder", "J_Bip_L_Shoulder"],
+            props.org_upper_arm_l : ["LeftArm", "J_Bip_L_UpperArm"],
+            props.org_forearm_l : ["LeftForeArm", "J_Bip_L_LowerArm"],
+            props.org_hand_l : ["LeftHand", "J_Bip_L_Hand"],
+            props.org_thigh_l : ["LeftUpLeg", "J_Bip_L_UpperLeg"],
+            props.org_shin_l : ["LeftLeg", "J_Bip_L_LowerLeg"],
+            props.org_foot_l : ["LeftFoot", "J_Bip_L_Foot"],
+            props.org_toe_l : ["LeftToeBase", "J_Bip_L_ToeBase"],
         }
         count = 0
+        skipped = 0
         for bone in context.selected_pose_bones:
             if bone.name not in bone_binds:
                 continue
+            target_name = resolve_subtarget(mocap, bone_binds[bone.name])
+            if target_name is None:
+                skipped += 1
+                continue
             con = bone.constraints.new('COPY_ROTATION')
             con.target = mocap
-            con.subtarget = bone_binds[bone.name]
+            con.subtarget = target_name
 
             ## Local doesn't really work if rigify bones aren't straight
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
@@ -745,14 +880,25 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
             # con.influence = 1.0
             # con.mix_mode = 'AFTER'
             count += 1
+        if skipped:
+            self.report({'WARNING'}, f"{skipped} bones had no matching mocap target")
 
         # Hips location bind
+        hips_candidates = ["Hips", "J_Bip_C_Hips", "hips", "Hip"]
+        hips_name = resolve_subtarget(mocap, hips_candidates)
+        if hips_name is None:
+            hips_name = find_root_bone(mocap)
+            if hips_name:
+                self.report({'INFO'}, f"No hips candidate matched; using root bone '{hips_name}'")
         for bone in context.selected_pose_bones:
             if bone.name != "ORG-spine":
                 continue
+            if hips_name is None:
+                self.report({'WARNING'}, "No 'Hips' bone found in mocap rig")
+                break
             con = bone.constraints.new('COPY_LOCATION')
             con.target = mocap
-            con.subtarget = "Hips"
+            con.subtarget = hips_name
 
             # setattr(con, "target_space", 'LOCAL_OWNER_ORIENT')
             con.target_space = 'LOCAL_OWNER_ORIENT'
@@ -762,7 +908,7 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
 
 
         
-        # SPINE BONES   
+        # SPINE BONES
         bpy.ops.object.editmode_toggle(True)
         bpy.ops.armature.select_all(action='SELECT')
 
@@ -801,6 +947,53 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
 
         bpy.ops.object.mode_set(mode='OBJECT')
         self.report({'INFO'}, f"{count} bindings added")
+        return {'FINISHED'}
+
+
+class Rigify_utils_Bind_rigify_to_mocap(bpy.types.Operator):
+    """Run all four binding steps for a selected Rigify and Mocap pair"""
+    bl_idname = "rigify_utils.bind_rigify_to_mocap"
+    bl_label = "Bind Rigify to Mocap"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        selected = list(context.selected_objects)
+        armatures = [obj for obj in selected if obj.type == 'ARMATURE']
+        if len(selected) != 2 or len(armatures) != 2:
+            self.report({'ERROR'}, "Select exactly two armatures: Rigify and Mocap")
+            return {'CANCELLED'}
+
+        rigify_candidates = [
+            obj for obj in armatures
+            if obj.data.collections_all.find("Torso (Tweak)") != -1
+            and not obj.name.endswith("-copy")
+            and "-copy." not in obj.name
+        ]
+        mocap_candidates = [
+            obj for obj in armatures
+            if "Hips" in obj.pose.bones
+        ]
+        if len(rigify_candidates) != 1 or len(mocap_candidates) != 1:
+            self.report({'ERROR'}, "Could not identify one Rigify rig and one Mocap rig")
+            return {'CANCELLED'}
+
+        rigify = rigify_candidates[0]
+        mocap = mocap_candidates[0]
+        if rigify == mocap:
+            self.report({'ERROR'}, "Rigify and Mocap must be different armatures")
+            return {'CANCELLED'}
+
+        try:
+            org_copy = bind_step1(context, rigify)
+            driver_copy = bind_step2(context, rigify, org_copy)
+            bind_step3(context, rigify, driver_copy)
+            bind_step4(context, org_copy, mocap)
+        except Exception as error:
+            self.report({'ERROR'}, f"Binding failed: {error}")
+            return {'CANCELLED'}
+
+        _select_objects(context, (rigify, mocap), rigify)
+        self.report({'INFO'}, "Rigify successfully bound to Mocap")
         return {'FINISHED'}
 
 
@@ -967,4 +1160,26 @@ class MyAddonProperties(bpy.types.PropertyGroup):
         name="ORG-toe.L",
         description="ORG Bones",
         default="ORG-toe.L"
+    )
+
+    # IK control bones that receive Damped Track in step 3
+    usr_upper_arm_l: bpy.props.StringProperty(
+        name="Upper Arm IK L",
+        description="IK bone that gets Damped Track to ORG-forearm.L",
+        default="upper_arm_ik.L"
+    )
+    usr_upper_arm_r: bpy.props.StringProperty(
+        name="Upper Arm IK R",
+        description="IK bone that gets Damped Track to ORG-forearm.R",
+        default="upper_arm_ik.R"
+    )
+    usr_thigh_l: bpy.props.StringProperty(
+        name="Thigh IK L",
+        description="IK bone that gets Damped Track to ORG-shin.L",
+        default="thigh_ik.L"
+    )
+    usr_thigh_r: bpy.props.StringProperty(
+        name="Thigh IK R",
+        description="IK bone that gets Damped Track to ORG-shin.R",
+        default="thigh_ik.R"
     )
