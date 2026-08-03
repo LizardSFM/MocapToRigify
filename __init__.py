@@ -287,6 +287,10 @@ class MOCAPTORIGIFY_PT_mapping(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
                 ("usr_hand_r", "Hand R"),
                 ("usr_foot_l", "Foot L"),
                 ("usr_foot_r", "Foot R"),
+                ("usr_upper_arm_l", "Upper Arm IK L"),
+                ("usr_upper_arm_r", "Upper Arm IK R"),
+                ("usr_thigh_l", "Thigh IK L"),
+                ("usr_thigh_r", "Thigh IK R"),
             ),
         )
         draw_mapping_group(

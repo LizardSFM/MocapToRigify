@@ -757,6 +757,40 @@ class Rigify_utils_Copy_rig3(bpy.types.Operator):
                     con.influence = 1.0
                     con.use_offset = True # allows moving around
 
+        # Damped Track constraints on the driver copy's IK bones,
+        # pointing at the ORG bones on the *-copy-org-mch rig so elbows/knees
+        # aim toward the mocap-driven child bones.
+        copy_org_mch_name = copy_org.name.replace("-copy", "-copy-org-mch", 1)
+        copy_org_mch = bpy.data.objects.get(copy_org_mch_name)
+        if copy_org_mch is None:
+            self.report({'WARNING'}, f"Damped Track: could not find '{copy_org_mch_name}'")
+        else:
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            copy_org.select_set(True)
+            bpy.context.view_layer.objects.active = copy_org
+            bpy.ops.object.posemode_toggle(True)
+
+            damped_track_binds = {
+                props.usr_upper_arm_r: props.org_forearm_r,
+                props.usr_upper_arm_l: props.org_forearm_l,
+                props.usr_thigh_r:     props.org_shin_r,
+                props.usr_thigh_l:     props.org_shin_l,
+            }
+            for ik_bone_name, org_target_name in damped_track_binds.items():
+                if not ik_bone_name or not org_target_name:
+                    continue
+                pbone = copy_org.pose.bones.get(ik_bone_name)
+                if pbone is None:
+                    self.report({'WARNING'}, f"Damped Track: '{ik_bone_name}' not found on {copy_org.name}")
+                    continue
+                con = pbone.constraints.new('DAMPED_TRACK')
+                con.name = con.name + "-damped"
+                con.target = copy_org_mch
+                con.subtarget = org_target_name
+                con.head_tail = 0.0
+                con.track_axis = 'TRACK_NEGATIVE_Z'
+
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.select_all(action='DESELECT')
         orig.select_set(True)
@@ -1107,4 +1141,26 @@ class MyAddonProperties(bpy.types.PropertyGroup):
         name="ORG-toe.L",
         description="ORG Bones",
         default="ORG-toe.L"
+    )
+
+    # IK control bones that receive Damped Track in step 3
+    usr_upper_arm_l: bpy.props.StringProperty(
+        name="Upper Arm IK L",
+        description="IK bone that gets Damped Track to ORG-forearm.L",
+        default="upper_arm_ik.L"
+    )
+    usr_upper_arm_r: bpy.props.StringProperty(
+        name="Upper Arm IK R",
+        description="IK bone that gets Damped Track to ORG-forearm.R",
+        default="upper_arm_ik.R"
+    )
+    usr_thigh_l: bpy.props.StringProperty(
+        name="Thigh IK L",
+        description="IK bone that gets Damped Track to ORG-shin.L",
+        default="thigh_ik.L"
+    )
+    usr_thigh_r: bpy.props.StringProperty(
+        name="Thigh IK R",
+        description="IK bone that gets Damped Track to ORG-shin.R",
+        default="thigh_ik.R"
     )
