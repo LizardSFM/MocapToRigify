@@ -348,6 +348,61 @@ def pair_spines_by_ratio(copy_bones, mocap_bones):
     return pairs
 
 
+def pair_spines_weighted(copy_bones, mocap_bones, min_weight=0.2):
+    """Like pair_spines_by_ratio, but returns up to two neighboring mocap bones
+    per copy bone with influence split by linear interpolation of the Z-ratio.
+    Returns {copy_name: [(mocap_name, influence), ...]}.
+    Neighbors with weight below min_weight are dropped; if both are below, the
+    dominant one is kept at full 1.0 influence. Assumes Z-sorted input."""
+    if not copy_bones or not mocap_bones:
+        return {}
+    copy_z_min = copy_bones[0].head.z
+    copy_z_max = copy_bones[-1].head.z
+    mocap_z_min = mocap_bones[0].head.z
+    mocap_z_max = mocap_bones[-1].head.z
+    copy_spine_len = copy_z_max - copy_z_min
+    mocap_spine_len = mocap_z_max - mocap_z_min
+    mocap_ratios = []
+    for mb in mocap_bones:
+        r = (mb.head.z - mocap_z_min) / mocap_spine_len if mocap_spine_len > 1e-5 else 0.0
+        mocap_ratios.append((r, mb))
+    pairs = {}
+    for cb in copy_bones:
+        cb_ratio = (cb.head.z - copy_z_min) / copy_spine_len if copy_spine_len > 1e-5 else 0.0
+        lower = None
+        upper = None
+        for r, mb in mocap_ratios:
+            if r <= cb_ratio:
+                lower = (r, mb)
+            if r >= cb_ratio and upper is None:
+                upper = (r, mb)
+        candidates = []
+        if lower and upper and lower[1].name != upper[1].name:
+            span = upper[0] - lower[0]
+            if span > 1e-5:
+                w_upper = (cb_ratio - lower[0]) / span
+                w_lower = 1.0 - w_upper
+            else:
+                w_upper = 0.5
+                w_lower = 0.5
+            if w_lower >= min_weight:
+                candidates.append((lower[1].name, w_lower))
+            if w_upper >= min_weight:
+                candidates.append((upper[1].name, w_upper))
+            if not candidates:
+                if w_lower >= w_upper:
+                    candidates.append((lower[1].name, 1.0))
+                else:
+                    candidates.append((upper[1].name, 1.0))
+        elif lower:
+            candidates.append((lower[1].name, 1.0))
+        elif upper:
+            candidates.append((upper[1].name, 1.0))
+        if candidates:
+            pairs[cb.name] = candidates
+    return pairs
+
+
 # TODO: Ignore MCH-torso.parent from copy rotation
 class Rigify_spine_retarget(bpy.types.Operator):
     """Find spine bones close to other rig's spine bones, and retarget"""
@@ -941,7 +996,10 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         # Get center bones for copy rigify rig
         bones_copy = find_centered_bones(copy.data.edit_bones)
         bones_mocap = find_centered_bones(mocap.data.edit_bones)
-        bones_pairs = pair_spines_by_ratio(bones_copy, bones_mocap)
+        if props.spine_weighted_blend:
+            bones_pairs = pair_spines_weighted(bones_copy, bones_mocap)
+        else:
+            bones_pairs = pair_spines_by_ratio(bones_copy, bones_mocap)
         if props.mch_torso in bones_pairs:
             del bones_pairs[props.mch_torso]  # Ignore torso parent
         for copy_name, mocap_name in bones_pairs.items():
@@ -953,12 +1011,21 @@ class Rigify_utils_Copy_rig4(bpy.types.Operator):
         for bone in copy.pose.bones:
             if bone.name in bones_pairs:
                 bone.select = True
-        
+
         for bone in context.selected_pose_bones:
-        # for bone, pair in bones_pairs.items():
-            con = bone.constraints.new('COPY_ROTATION')
-            con.target = mocap
-            con.subtarget = bones_pairs[bone.name]
+            value = bones_pairs[bone.name]
+            if props.spine_weighted_blend and isinstance(value, list):
+                # Weighted: create one COPY_ROTATION per (mocap_bone, influence)
+                for mocap_name, weight in value:
+                    con = bone.constraints.new('COPY_ROTATION')
+                    con.target = mocap
+                    con.subtarget = mocap_name
+                    con.influence = weight
+            else:
+                # Single 1:1 match (value is a mocap bone name string)
+                con = bone.constraints.new('COPY_ROTATION')
+                con.target = mocap
+                con.subtarget = value
 
             # copypaste
             ## Local doesn't really work if rigify bones aren't straight
@@ -1205,4 +1272,11 @@ class MyAddonProperties(bpy.types.PropertyGroup):
         name="Thigh IK R",
         description="IK bone that gets Damped Track to ORG-shin.R",
         default="thigh_ik.R"
+    )
+
+    # Spine retargeting options (step 4)
+    spine_weighted_blend: bpy.props.BoolProperty(
+        name="Weighted Spine Blend",
+        description="Split spine COPY_ROTATION influence between neighboring Mocap bones by ratio (step 4)",
+        default=False,
     )

@@ -200,15 +200,21 @@ class MOCAPTORIGIFY_PT_debug_steps(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
             step3_ready,
             "CONSTRAINT_BONE",
         )
-        draw_step(
-            layout,
-            4,
-            "Bind Mocap Source",
+        # Step 4 with its weighted-spine toggle.
+        step4_box = layout.box()
+        step4_box.label(text="4. Bind Mocap Source")
+        step4_action = step4_box.column()
+        step4_action.enabled = step4_ready
+        step4_action.operator(
             "rigify_utils.copy_rig4",
-            "Bind Mocap",
-            "Select ORG/MCH copy + Mocap armature.",
-            step4_ready,
-            "LINKED",
+            text="Bind Mocap",
+            icon="LINKED",
+        )
+        step4_box.label(text="Select ORG/MCH copy + Mocap armature.", icon="INFO")
+        step4_box.prop(
+            context.scene.my_addon_props,
+            "spine_weighted_blend",
+            icon="MOD_NOISE",
         )
 
 
