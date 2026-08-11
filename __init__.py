@@ -10,51 +10,22 @@ bl_info = {
 
 import bpy
 
-from .animation import constrains, rigify
-
-
-GENERATED_ROLE_KEY = "mocap_to_rigify_role"
-ROLE_COPY_ORG_MCH = "copy_org_mch"
-ROLE_DRIVER_COPY = "driver_copy"
+from .animation import constrains, mapping, rigify
+from .animation.mapping import (
+    is_driver_copy,
+    is_org_copy,
+    is_original_rigify,
+)
 
 
 def selected_armatures(context):
     return [obj for obj in context.selected_objects if obj.type == "ARMATURE"]
 
 
-def has_bone_collection(obj, collection_name):
-    return (
-        obj.type == "ARMATURE"
-        and obj.data.collections_all.find(collection_name) != -1
-    )
-
-
-def is_original_rigify(obj):
-    return (
-        has_bone_collection(obj, "Torso (Tweak)")
-        and obj.get(GENERATED_ROLE_KEY) != ROLE_DRIVER_COPY
-        and not obj.name.endswith("-copy")
-        and "-copy." not in obj.name
-    )
-
-
-def is_org_copy(obj):
-    return (
-        obj.get(GENERATED_ROLE_KEY) == ROLE_COPY_ORG_MCH
-        or has_bone_collection(obj, "ORG-mocap")
-    )
-
-
-def is_driver_copy(obj):
-    return (
-        obj.get(GENERATED_ROLE_KEY) == ROLE_DRIVER_COPY
-        or obj.name.endswith("-copy")
-        or "-copy." in obj.name
-    )
-
-
 def is_mocap(obj):
-    return obj.type == "ARMATURE" and "Hips" in obj.pose.bones
+    # Recognising a mocap source by a bone literally called "Hips" only ever
+    # matched Mixamo. Ask the mapper instead, it knows the other conventions.
+    return mapping.is_mocap_armature(obj)
 
 
 def selection_is_pair(armatures, first_test, second_test):
@@ -276,6 +247,21 @@ class MOCAPTORIGIFY_PT_mapping(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
         layout.use_property_decorate = False
         props = context.scene.my_addon_props
 
+        mocap_box = layout.box()
+        mocap_box.label(text="Mocap Bones")
+        mocap_box.operator(
+            "rigify_utils.detect_mocap_bones",
+            text="Detect From Selected Mocap",
+            icon="VIEWZOOM",
+        )
+        for slot in mapping.SLOTS:
+            mocap_box.prop(
+                props,
+                mapping.mocap_prop_name(slot),
+                text=mapping.SLOT_LABELS[slot],
+            )
+        mocap_box.prop(props, "hip_translation_scale", text="Hip Translation")
+
         draw_mapping_group(
             layout,
             "User Controls",
@@ -286,6 +272,8 @@ class MOCAPTORIGIFY_PT_mapping(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
                 ("usr_hand_r", "Hand R"),
                 ("usr_foot_l", "Foot L"),
                 ("usr_foot_r", "Foot R"),
+                ("usr_neck", "Neck"),
+                ("usr_head", "Head"),
             ),
         )
         draw_mapping_group(
@@ -343,14 +331,11 @@ classes = (
     constrains.BONECONSTRAINTS_OT_apply,
     constrains.BONECONSTRAINTS_OT_keyframe_influence,
     constrains.BONECONSTRAINTS_OT_bake_and_remove,
-    rigify.BONECONSTRAINTS_test,
-    rigify.BONECONSTRAINTS_OT_Copy_rig,
-    rigify.BONECONSTRAINTS_OT_Copy_to_mocap_constrains,
-    rigify.Rigify_spine_retarget,
     rigify.Rigify_utils_Copy_rig,
     rigify.Rigify_utils_Copy_rig2,
     rigify.Rigify_utils_Copy_rig3,
     rigify.Rigify_utils_Copy_rig4,
+    rigify.Rigify_utils_Detect_mocap_bones,
     rigify.Rigify_utils_Bind_rigify_to_mocap,
     rigify.MyAddonProperties,
     MOCAPTORIGIFY_PT_workflow,

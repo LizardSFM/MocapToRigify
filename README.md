@@ -10,8 +10,8 @@ A Blender add-on that binds a **Mocap Fusion** motion-capture rig to a **Rigify*
 
 The add-on sets up a **multi-rig retargeting chain** that transfers motion from a Mocap Fusion skeleton onto a Rigify rig following two core principles:
 
-1. **Copy rotations only** — limb/spine bones receive `COPY_ROTATION` constraints from their mocap counterparts.
-2. **Hips get location** — the root spine bone additionally receives a `COPY_LOCATION` constraint (with `use_offset = True`) so it follows hip translation while still being movable.
+1. **Copy rotations only** — limb/spine bones follow their mocap counterparts in rotation, through a per-bone helper (`RTG-*`) that cancels the rest-pose difference between the two skeletons. See §6.
+2. **Hips get location** — the root spine bone additionally receives a `TRANSFORM` constraint (location→location, `ADD`) so it follows hip translation while still being movable, with an adjustable gain.
 
 ### Why multiple rigs (non-destructive correction)
 
@@ -31,8 +31,8 @@ Mocap rig  ──(rot + hips loc)──►  copy-org-mch  ──►  *-copy  ─
 
 - **Source app:** Mocap Fusion.
 - **Export:** BVH, or a `.blend` file containing a custom import script that loads all mocap animations into the scene at once.
-- **Skeleton:** *Not* Mixamo. The mocap bone tree uses names like `Hips`, `RightArm`, `LeftForeArm`, `RightUpLeg`, `RightForeArm`, `RightFoot`, `RightToeBase`, … (standard hierarchical BVH naming).
-- **Bone-name mapping** between Rigify `ORG-*` bones and mocap bones lives in the `bone_binds` dictionaries inside `animation/rigify.py` (see §6).
+- **Skeleton:** any humanoid naming convention. Mocap Fusion / BVH (`Hips`, `RightArm`, `LeftForeArm`, …), Mixamo (`mixamorig:LeftArm`), VRM (`J_Bip_L_UpperArm`) and Unreal (`upperarm_l`) are all recognised, and a single rig may mix them — real captures do (one of the test rigs uses `J_Bip_C_Hips` alongside `Spine` and `RightArm`).
+- **Bone-name mapping** is resolved per bone by `animation/mapping.py`, not chosen as a whole-rig preset. Anything it fails to identify can be typed into *Bone Mapping → Mocap Bones* in the panel; a filled-in field wins over detection, but only if the selected armature actually has that bone.
 
 ---
 
@@ -45,7 +45,7 @@ The panel group `rigify_utils.copy_rig1–4` is the current workflow. The four b
 | 1 | `Copy rigify rig`   | `rigify_utils.copy_rig`  | Original **Rigify** rig (active) | `*-copy-org-mch` — duplicate of the Rigify rig containing only **ORG + MCH** bones, reparented into a clean chain |
 | 2 | `Copy rigify rig2`  | `rigify_utils.copy_rig2` | Original Rigify rig **+** `*-copy-org-mch` | `*-copy` — second duplicate of the original Rigify rig; its torso IK / hand IK / foot IK MCH parents and `spine_fk` chain get constrained to `*-copy-org-mch` |
 | 3 | `Copy rigify rig3`  | `rigify_utils.copy_rig3` | Original Rigify rig **+** `*-copy` | Adds `COPY_ROTATION` (and `COPY_LOCATION` for IK bones) on the **original** Rigify rig's bones, driven by `*-copy` |
-| 4 | `Copy rigify rig4`  | `rigify_utils.copy_rig4` | `*-copy-org-mch` **+** **Mocap** rig | Binds `*-copy-org-mch` to the Mocap rig: limb rotations, spine rotations (auto-paired by proximity), and hips location |
+| 4 | `Copy rigify rig4`  | `rigify_utils.copy_rig4` | `*-copy-org-mch` **+** **Mocap** rig | Binds `*-copy-org-mch` to the Mocap rig: limb rotations, spine rotations (paired by name and hierarchy), and hips location. Idempotent — re-running replaces the previous bind |
 
 After step 4, motion flows: **Mocap → copy-org-mch → *-copy → original Rigify rig**.
 
@@ -53,13 +53,17 @@ After step 4, motion flows: **Mocap → copy-org-mch → *-copy → original Rig
 
 Steps 1–4 read bone names from the `MyAddonProperties` property group exposed in the panel (`context.scene.my_addon_props`). These let you remap bones if the Rigify rig was customized. The groups are:
 
-- **User-controlled bones** (`usr_*`): `torso`, `hand_ik.L/R`, `foot_ik.L/R`.
+- **User-controlled bones** (`usr_*`): `torso`, `hand_ik.L/R`, `foot_ik.L/R`, `neck`, `head`.
 - **MCH bones** (`mch_*`): `MCH-torso.parent`, `MCH-hand_ik.parent.L/R`, `MCH-foot_ik.parent.L/R`.
 - **ORG bones** (`org_*`): `ORG-spine`, `ORG-hand.L/R`, `ORG-foot.L/R`, plus limb chains `ORG-{shoulder,upper_arm,forearm,thigh,shin,toe}.{L,R}`.
+- **Mocap bones** (`mocap_*`): one field per humanoid slot, filled by *Detect From Selected Mocap* or by hand.
+- **`hip_translation_scale`**: gain on the root travel, for when the mocap character is a different size than the Rigify one.
 
-### Spine auto-pairing heuristic
+### Spine pairing
 
-Steps that bind the spine do **not** use a hard-coded name map. Instead `find_centered_bones()` picks all bones lying on the X≈0 center plane, sorts them by head Z, and `find_closest_bone()` pairs each Rigify spine bone with the nearest mocap spine bone by midpoint distance. `MCH-torso.parent` is explicitly skipped.
+The Rigify spine chain is walked structurally — from `ORG-spine` upward, always following the child whose head sits on the parent's tail. Three anchors tie it to the mocap chain: the hips at the bottom, the bone the shoulders are parented to in the middle (`ORG-spine.003` against the mocap's `UpperChest` or equivalent), and the head on top. Bones between anchors are distributed proportionally, so a 7-bone Rigify spine works against a 6-bone mocap spine.
+
+This replaced an earlier heuristic that picked bones lying on the X≈0 plane and paired them by proximity. It broke on any mocap rig whose rest bones are not centred in armature space — one of the test captures sits 1.1 m off X in its own local space, which yielded an empty list and crashed step 4 partway through, after the arms and legs had already been bound. That is the "only arms and legs bind" symptom.
 
 ---
 
@@ -87,34 +91,26 @@ To pin a shaking foot to the ground and later release it back to mocap:
 
 ## 5. Legacy / dead operators
 
-The panel still registers older operators that are **deprecated** and kept only for reference. They should be removed or reworked before shipping:
-
-- `Test` — `boneconstraints.test` — no-op debug stub.
-- `Copy rigify rig` (the *non*-`rigify_utils` one) — `boneconstraints.copy_rig` — older single-shot version of step 1.
-- `Mocap/copy bind` — `boneconstraints.copy_to_mocap_constr` — older version of step 4.
-- `Spine retarget` — `boneconstraints.rigify_spine_retarget` — older standalone spine binder.
-
-Their logic is essentially duplicated by the `rigify_utils.copy_rig*` pipeline and they carry the same bugs.
+Removed. `boneconstraints.test`, `boneconstraints.copy_rig`, `boneconstraints.copy_to_mocap_constr` and `boneconstraints.rigify_spine_retarget` duplicated the `rigify_utils.copy_rig*` pipeline with the same bugs and were never wired into the panel. The constraint-cleanup operators in §4 are unaffected.
 
 ---
 
-## 6. Bone mapping reference
+## 6. How a bone is retargeted
 
-Rigify `ORG-*` → Mocap Fusion (from the `bone_binds` table, `animation/rigify.py`):
+A plain world-space `COPY_ROTATION` sets `ORG_pose = MOCAP_pose`, which is only right when both bones share a rest orientation. They rarely do. Measured on the test file, Rigify's `ORG-hand.L` sits **102°** away from the capture's `LeftHand` at rest, and that error rides straight through `MCH-hand_ik.parent` into `hand_ik` — the "hands are rotated 90°" bug.
 
-| Rigify ORG | Mocap |
-|------------|-------|
-| `ORG-shoulder.R/L` | `RightShoulder` / `LeftShoulder` |
-| `ORG-upper_arm.R/L` | `RightArm` / `LeftArm` |
-| `ORG-forearm.R/L` | `RightForeArm` / `LeftForeArm` |
-| `ORG-hand.R/L` | `RightHand` / `LeftHand` |
-| `ORG-thigh.R/L` | `RightUpLeg` / `LeftUpLeg` |
-| `ORG-shin.R/L` | `RightLeg` / `LeftLeg` |
-| `ORG-foot.R/L` | `RightFoot` / `LeftFoot` |
-| `ORG-toe.R/L` | `RightToeBase` / `LeftToeBase` |
-| `ORG-spine` (+`COPY_LOCATION`) | `Hips` |
+Step 4 therefore builds, for every retargeted bone, an unparented helper `RTG-<bone>` in a hidden `RTG-mocap` collection:
 
-Spine chain bones are matched automatically by position, not by name.
+- the helper gets a **`CHILD_OF`** constraint on the mocap bone, with `inverse_matrix` set to the mocap bone's **rest** matrix. Child Of evaluates as `owner = target_pose · inverse_matrix · owner_rest`, so the helper ends up at `MOCAP_pose · MOCAP_rest⁻¹ · ORG_rest` — the rotation the mocap bone actually travelled, applied on top of Rigify's own rest;
+- the ORG bone gets a world **`COPY_ROTATION`** off its helper.
+
+**Rest-pose alignment.** For the arms and legs only, the helper is additionally swung so it points the way the mocap bone points at rest (`_align_proxy_to_mocap_rest`). Rigify rests in an A-pose and most captures rest in a T-pose; without this the two stack and an arm lowered 80° from a T-pose lands 110° down on a rig already 30° down, putting the hands across the body. Only the swing is taken, never the twist, so the roll fix survives. The torso is excluded on purpose — spine bones already agree between rigs, and a hips bone that points the opposite way by convention (VRM's does) would be turned upside down by a swing.
+
+Net effect, measured against the capture over a whole clip: hands and feet point where the mocap points to within 0.1°, and the leftover roll is a fixed rest-convention offset that does not drift.
+
+### Slots
+
+`animation/mapping.py` maps 22 humanoid slots — `hips, spine, chest, upper_chest, neck, head` plus `shoulder / upper_arm / forearm / hand` and `thigh / shin / foot / toe` per side. The Rigify side comes from the `org_*` fields and the structural spine walk; the mocap side from `MOCAP_SYNONYMS` plus the panel overrides.
 
 ---
 
@@ -163,13 +159,24 @@ MocapToRigify/
 
 > These are live bugs/gotchas. Fixing them is tracked separately; do not assume the code is correct as-is.
 
-### Critical (crashes / wrong output)
+### Fixed
 
-1. **`Bone.select` crash on Blender 5.0.** Several operators iterate `armature.data.bones` and set `bone.select = True`. In Blender 5.0 `bpy.types.Bone` no longer exposes `.select` (deprecated since 2.8, now removed), raising `AttributeError`. Affects: `Copy_rig4` (select-all + spine subset), `Copy_to_mocap_constrains` (select-all), `Rigify_spine_retarget` (spine subset). **Fix:** use `bpy.ops.pose.select_all(action='SELECT')` for "select all", and iterate `armature.pose.bones` directly (instead of `context.selected_pose_bones`) for the subset cases.
-2. **Duplicate dict key in `Copy_to_mocap_constrains`** — `"ORG-upper_arm.R"` appears twice; the `"RightShoulder"` binding is silently overwritten by `"RightArm"`.
-3. **Wrong property for left toe in `Copy_rig4`** — line maps `props.org_toe_r : "LeftToeBase"`; should be `props.org_toe_l`.
-4. **Latent `KeyError` in spine loops** — `bones_pairs[bone.name]` assumes every selected pose bone is a paired spine bone. If anything else is selected, it crashes.
-5. **`constraints_clear()` in a per-bone loop** — `Rigify_utils_Copy_rig` calls `bpy.ops.pose.constraints_clear()` once per pose bone; that clears the *entire* armature N times. Call it once.
+1. **Step 4 crashed partway through on off-centre mocap rigs** — see §3. Arms and legs were bound, then `find_closest_bone()` returned `None` and the operator died before the spine, head and neck.
+2. **Hands rotated ~102°** — rest-orientation mismatch, see §6.
+3. **Mocap names were hard-coded to Mixamo** — a VRM-named capture produced 14 invalid constraints out of 21. Replaced by the slot mapper.
+4. **Wrong property for left toe in `Copy_rig4`** — `props.org_toe_r` was used as a dict key twice, so `ORG-toe.R` bound to `LeftToeBase` and `ORG-toe.L` bound to nothing.
+5. **`"Hips"` hard-coded** for the hips location constraint; neither test capture has a bone by that name.
+6. **`is_mocap()` required a bone literally named `Hips`**, which left the one-click button permanently greyed out.
+7. **Step 4 picked its two objects by selection order** — it looked for an `"ORG"` bone collection that step 1 had already renamed to `"ORG-mocap"`, so the test missed on both objects and always swapped them.
+8. **Re-binding stacked constraints** — steps 3 and 4 now strip their own previous output first.
+9. **Step 3 only bound *visible* bones.** `pose.select_all` skips closed collections, so `spine_fk` (in the closed *Torso (Tweak)* collection) was never bound and the chest and head followed the torso rigidly, ~20° off. It now binds every bone outside `ORG`/`MCH`/`DEF`.
+10. **Step 2 never bound the neck or head** — the `spine_fk` chain stops at the chest, so nothing above it followed the capture.
+
+### Still open
+
+- **Elbows and knees.** Only the IK targets are driven, so the elbow and knee land wherever Rigify's pole targets put them: `DEF-upper_arm` sits ~35° off the captured arm even though the hand is exact. Driving the poles from the capture's actual elbow position is not implemented.
+- **`constraints_clear()` in a per-bone loop** — `Rigify_utils_Copy_rig` calls `bpy.ops.pose.constraints_clear()` once per pose bone; that clears the *entire* armature N times. Call it once.
+- **Fingers are not retargeted**, and step 1 leaves the copy's palm bones unparented.
 
 ### Robustness
 
@@ -194,10 +201,12 @@ How the pipeline configures spaces (useful when debugging jitter or wrong orient
 
 | Binding | Constraint | `target_space` | `owner_space` | Notes |
 |---------|------------|----------------|---------------|-------|
-| Limb rotations (Mocap→copy-org-mch) | `COPY_ROTATION` | default | default | World-aligned copy; works because Rigify limb bones are roughly axis-aligned. |
-| Hips location (Mocap→copy-org-mch)   | `COPY_LOCATION` | `LOCAL_OWNER_ORIENT` | `LOCAL` | `use_offset = True` so you can still move the hips. |
+| Mocap → `RTG-*` helper | `CHILD_OF` | — | — | `inverse_matrix` = the mocap bone's rest matrix, which turns Child Of into a rest-relative follow. |
+| `RTG-*` helper → ORG bone | `COPY_ROTATION` | default | default | World copy, exact because the helper carries the corrected rest. |
+| Hips location (Mocap→copy-org-mch)   | `TRANSFORM` | `LOCAL_OWNER_ORIENT` | `LOCAL` | Location→location, `mix_mode='ADD'`, `[-1,1] → [-k,k]` with extrapolation, so `k` is a plain gain. |
 | copy-org-mch → *-copy (torso/hand/foot MCH) | `COPY_LOCATION` + `COPY_ROTATION` | default | default | Drives the MCH parents. |
-| *-copy → original Rigify (all bones) | `COPY_ROTATION` | `LOCAL` | `LOCAL` | `mix_mode = 'AFTER'`. |
+| copy-org-mch → *-copy (neck / head) | `COPY_ROTATION` | default | default | The head control sits exactly on the last ORG spine bone, so a world copy is exact. |
+| *-copy → original Rigify (control bones) | `COPY_ROTATION` | `LOCAL` | `LOCAL` | `mix_mode = 'AFTER'`, so your own keys layer on top. |
 | *-copy → original Rigify (IK bones) | `COPY_LOCATION` | `LOCAL_WITH_PARENT` | `LOCAL_WITH_PARENT` | `use_offset = True`. |
 | Spine_fk → copy-org-mch spine | `COPY_ROTATION` | default | default | Paired by `head_local`/`tail_local` touching within 0.0001. |
 
