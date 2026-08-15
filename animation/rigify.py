@@ -102,23 +102,64 @@ def _positional_def_counterpart(org_bone, def_bones, skip):
     return best
 
 
+def _find_def_parent(org_parent, def_bones, skip):
+    """Find the DEF parent for a DEF bone hanging under an ORG bone.
+
+    Walks up the ancestor chain starting at 'org_parent' and returns the
+    first usable DEF parent as a tuple:
+
+        (def bone, bone the match came from, hops above org_parent)
+
+    At each ancestor, in order:
+    - an ancestor that is itself a DEF bone is the answer (hierarchy);
+    - otherwise a DEF bone occupying exactly the same span (head and tail)
+      is the answer -- the ancestor's positional twin, e.g.
+      ORG-spine.003 -> DEF-spine.003.
+
+    'skip' is the DEF bone being re-parented. It and everything below it
+    are never returned, so a DEF bone hanging under its own ORG
+    counterpart does not match itself: that level simply yields nothing
+    and the walk continues with the next ancestor. Returns None when the
+    chain tops out without a usable DEF bone.
+    """
+    ancestor = org_parent
+    hops = 0
+    while ancestor is not None:
+        if (
+            ancestor.name.startswith("DEF-")
+            and ancestor != skip
+            and not _is_descendant(ancestor, skip)
+        ):
+            return ancestor, ancestor, hops
+        twin = _positional_def_counterpart(ancestor, def_bones, skip)
+        if twin is not None and not _is_descendant(twin, skip):
+            return twin, ancestor, hops
+        ancestor = ancestor.parent
+        hops += 1
+    return None
+
+
 def rigify_def_parent_fix(armature_object, context=None):
     """Re-parent DEF bones that hang directly under an ORG bone.
 
     On some Rigify rigs a few DEF bones (shoulder, thigh, ...) end up
-    parented to an ORG bone instead of the deform chain, e.g.
-    DEF-shoulder.L -> ORG-spine.001. The new DEF parent is found with two
-    rules, in order:
+    parented to an ORG bone instead of the deform chain. The replacement
+    DEF parent is found by walking up the ancestor chain of the ORG parent
+    (_find_def_parent) and taking the first usable match:
 
-    1. The ORG parent is itself parented to a DEF bone: use that bone, so
-       the chain stays DEF -> DEF:
-           DEF-shoulder.L -> ORG-spine.001 -> DEF-spine.005
-           becomes DEF-shoulder.L -> DEF-spine.005
-    2. Otherwise (the ORG parent hangs under another ORG bone, an MCH bone
-       or nothing): use the DEF bone that sits in exactly the same spot as
-       the ORG parent (head and tail coincide), if there is one:
-           DEF-shoulder.L -> ORG-spine.001 (no DEF bone above it)
-           becomes DEF-shoulder.L -> DEF-spine.001
+    - an ancestor that is itself a DEF bone (pure hierarchy), or
+    - a DEF bone occupying exactly the same span as that ancestor, i.e.
+      its positional twin (ORG-spine.003 -> DEF-spine.003).
+
+    Examples:
+        DEF-thigh.L    -> ORG-spine.005              => DEF-spine.005
+        DEF-shoulder.L -> ORG-shoulder.L -> ORG-spine.003
+                                                      => DEF-spine.003
+        DEF-pelvis.L   -> ORG-pelvis.L   -> ORG-spine
+                                                      => DEF-spine
+
+    A DEF bone hanging under its own ORG counterpart cannot match itself,
+    so that level is skipped and the walk continues further up.
 
     Returns how many bones were re-parented.
     """
@@ -148,16 +189,10 @@ def rigify_def_parent_fix(armature_object, context=None):
         org_parent = bone.parent
         if org_parent is None or not org_parent.name.startswith("ORG-"):
             continue
-        matched_by_position = False
-        def_parent = org_parent.parent
-        if def_parent is None or not def_parent.name.startswith("DEF-"):
-            # The ORG parent does not lead to the DEF chain through the
-            # hierarchy: look for a DEF bone that is a positional copy of
-            # the ORG parent instead.
-            def_parent = _positional_def_counterpart(org_parent, def_bones, bone)
-            matched_by_position = def_parent is not None
-            if not matched_by_position:
-                continue
+        match = _find_def_parent(org_parent, def_bones, bone)
+        if match is None:
+            continue
+        def_parent, via_bone, hops = match
         if _is_descendant(def_parent, bone):
             # Would create a bone cycle; leave this one alone.
             continue
@@ -166,11 +201,13 @@ def rigify_def_parent_fix(armature_object, context=None):
         # parent, otherwise the connected flag would snap it out of place.
         bone.use_connect = (bone.head - def_parent.tail).length < 0.0001
         fixed += 1
-        if matched_by_position:
+        if via_bone is def_parent:
             print("DEF parent fix: '" + bone.name + "' -> '" + def_parent.name
-                  + "' (positional match for '" + org_parent.name + "')")
+                  + "' (DEF ancestor '" + via_bone.name + "')")
         else:
-            print("DEF parent fix: '" + bone.name + "' -> '" + def_parent.name + "'")
+            print("DEF parent fix: '" + bone.name + "' -> '" + def_parent.name
+                  + "' (twin of '" + via_bone.name + "', "
+                  + str(hops + 1) + " level(s) up)")
 
     bpy.ops.object.mode_set(mode='OBJECT')
 

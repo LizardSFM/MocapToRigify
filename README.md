@@ -58,7 +58,7 @@ Steps 1–4 read bone names from the `MyAddonProperties` property group exposed 
 - **ORG bones** (`org_*`): `ORG-spine`, `ORG-hand.L/R`, `ORG-foot.L/R`, plus limb chains `ORG-{shoulder,upper_arm,forearm,thigh,shin,toe}.{L,R}`.
 - **Mocap bones** (`mocap_*`): one field per humanoid slot, filled by *Detect From Selected Mocap* or by hand.
 - **`hip_translation_scale`**: gain on the root travel, for when the mocap character is a different size than the Rigify one.
-- **`fix_def_parents`** - step 1 option (checkbox above the *Create ORG/MCH Copy* button): once the copy is created, `rigify_def_parent_fix()` re-parents DEF bones on the **original** rig that hang under an ORG bone. The new parent is the DEF bone the ORG parent is parented to or, when the ORG parent leads to no DEF bone that way (its own parent is another ORG, an MCH or nothing), the DEF bone occupying exactly the same head/tail positions as the ORG parent (e.g. `DEF-shoulder.L` under `ORG-spine.001` moves to `DEF-spine.001`).
+- **`fix_def_parents`** - step 1 option (checkbox above the *Create ORG/MCH Copy* button): once the copy is created, `rigify_def_parent_fix()` re-parents DEF bones on the **original** rig that hang under an ORG bone. The new parent is found by walking up the ORG parent's ancestor chain and taking the first usable match: an ancestor that is itself a DEF bone, or a DEF bone occupying exactly the same head/tail positions as that ancestor (its positional twin, `ORG-spine.003` -> `DEF-spine.003`). A DEF bone hanging under its own ORG counterpart cannot match itself, so that level is skipped and the walk continues further up (`DEF-shoulder.L` under `ORG-shoulder.L` under `ORG-spine.003` lands on `DEF-spine.003`).
 
 ### Spine pairing
 
