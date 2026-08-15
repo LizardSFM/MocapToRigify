@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MocapToRigify",
     "author": "Liz",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > MocapToRigify",
     "description": "Non-destructive Mocap Fusion to Rigify retargeting",
@@ -51,9 +51,12 @@ def draw_status(layout, label, complete):
     row.label(text=label, icon="CHECKMARK" if complete else "DOT")
 
 
-def draw_step(layout, number, title, operator_id, button_text, hint, enabled, icon):
+def draw_step(layout, number, title, operator_id, button_text, hint, enabled, icon, checkbox=None):
     box = layout.box()
     box.label(text=f"{number}. {title}")
+    if checkbox is not None:
+        checkbox_props, checkbox_field = checkbox
+        box.prop(checkbox_props, checkbox_field)
     action = box.column()
     action.enabled = enabled
     action.operator(operator_id, text=button_text, icon=icon)
@@ -149,6 +152,7 @@ class MOCAPTORIGIFY_PT_debug_steps(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
             "Select the original Rigify armature.",
             step1_ready,
             "DUPLICATE",
+            checkbox=(context.scene.my_addon_props, "fix_def_parents"),
         )
         draw_step(
             layout,

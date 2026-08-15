@@ -58,6 +58,7 @@ Steps 1–4 read bone names from the `MyAddonProperties` property group exposed 
 - **ORG bones** (`org_*`): `ORG-spine`, `ORG-hand.L/R`, `ORG-foot.L/R`, plus limb chains `ORG-{shoulder,upper_arm,forearm,thigh,shin,toe}.{L,R}`.
 - **Mocap bones** (`mocap_*`): one field per humanoid slot, filled by *Detect From Selected Mocap* or by hand.
 - **`hip_translation_scale`**: gain on the root travel, for when the mocap character is a different size than the Rigify one.
+- **`fix_def_parents`** - step 1 option (checkbox above the *Create ORG/MCH Copy* button): once the copy is created, `rigify_def_parent_fix()` re-parents DEF bones on the **original** rig that hang under an ORG bone onto the DEF bone that ORG bone is parented to (e.g. `DEF-shoulder.L` parented to `ORG-spine.001` moves to that bone's DEF parent).
 
 ### Spine pairing
 

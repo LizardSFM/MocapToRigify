@@ -53,6 +53,67 @@ def find_closest_bone(current_bone, other_bones):
 
     return closest_bone, closest_dist
 
+
+def rigify_def_parent_fix(armature_object, context=None):
+    """Re-parent DEF bones that hang directly under an ORG bone.
+
+    On some Rigify rigs a few DEF bones (shoulder, thigh, ...) end up
+    parented to an ORG bone instead of the deform chain, e.g.
+    DEF-shoulder.L -> ORG-spine.001. When that ORG bone is itself parented
+    to a DEF bone, the DEF bone is moved over to it so the deform chain
+    stays DEF -> DEF:
+
+        DEF-shoulder.L -> ORG-spine.001 -> DEF-spine.005
+        becomes DEF-shoulder.L -> DEF-spine.005
+
+    Returns how many bones were re-parented.
+    """
+    if armature_object is None or armature_object.type != 'ARMATURE':
+        return 0
+
+    ctx = context or bpy.context
+    view_layer = ctx.view_layer
+    prev_active = view_layer.objects.active
+    prev_selected = [obj for obj in view_layer.objects if obj.select_get()]
+
+    # Bone parenting is only editable in Edit Mode, which needs the armature
+    # to be the active and selected object.
+    if ctx.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    for obj in prev_selected:
+        obj.select_set(False)
+    armature_object.select_set(True)
+    view_layer.objects.active = armature_object
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    fixed = 0
+    for bone in armature_object.data.edit_bones:
+        if not bone.name.startswith("DEF-"):
+            continue
+        org_parent = bone.parent
+        if org_parent is None or not org_parent.name.startswith("ORG-"):
+            continue
+        def_parent = org_parent.parent
+        if def_parent is None or not def_parent.name.startswith("DEF-"):
+            continue
+        bone.parent = def_parent
+        # Keep the bone connected only when it physically touches its new
+        # parent, otherwise the connected flag would snap it out of place.
+        bone.use_connect = (bone.head - def_parent.tail).length < 0.0001
+        fixed += 1
+        print("DEF parent fix: '" + bone.name + "' -> '" + def_parent.name + "'")
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Put the caller's selection and active object back.
+    for obj in prev_selected:
+        if obj.name in view_layer.objects:
+            obj.select_set(True)
+    if prev_active is not None and prev_active.name in view_layer.objects:
+        view_layer.objects.active = prev_active
+
+    return fixed
+
 ## TODO: clear constrains when copying, and back to pose position
 
 
@@ -455,7 +516,12 @@ class Rigify_utils_Copy_rig(bpy.types.Operator):
         # Tag the role so later steps recognise it even if it gets renamed.
         obj[mapping.GENERATED_ROLE_KEY] = mapping.ROLE_COPY_ORG_MCH
         orig_obj.select_set(True)
-        self.report({'INFO'}, f"Copied the rig")
+
+        if getattr(context.scene.my_addon_props, "fix_def_parents", False):
+            fixed = rigify_def_parent_fix(orig_obj, context)
+            self.report({'INFO'}, f"Copied the rig, re-parented {fixed} DEF bone(s)")
+        else:
+            self.report({'INFO'}, "Copied the rig")
         return {'FINISHED'}
 
 ## TODO: clear constrains when copying, and back to pose position
@@ -1022,6 +1088,17 @@ class MyAddonProperties(bpy.types.PropertyGroup):
     mocap_shin_r: bpy.props.StringProperty(name="Shin R", description=_MOCAP_DESC, default="")
     mocap_foot_r: bpy.props.StringProperty(name="Foot R", description=_MOCAP_DESC, default="")
     mocap_toe_r: bpy.props.StringProperty(name="Toe R", description=_MOCAP_DESC, default="")
+
+    # Step 1 option: repair DEF bones parented to ORG bones on the original
+    # rig, applied right after the ORG/MCH copy is created.
+    fix_def_parents: bpy.props.BoolProperty(
+        name="Fix DEF Parents",
+        description=(
+            "After creating the ORG/MCH copy, re-parent DEF bones that hang "
+            "under an ORG bone onto the DEF bone that ORG bone is parented to"
+        ),
+        default=False,
+    )
 
     hip_translation_scale: bpy.props.FloatProperty(
         name="Hip Translation Scale",
