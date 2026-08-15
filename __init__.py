@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MocapToRigify",
     "author": "Liz",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > MocapToRigify",
     "description": "Non-destructive Mocap Fusion to Rigify retargeting",
