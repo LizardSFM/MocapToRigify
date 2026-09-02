@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MocapToRigify",
     "author": "Liz",
-    "version": (1, 2, 2),
+    "version": (1, 3, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > MocapToRigify",
     "description": "Non-destructive Mocap Fusion to Rigify retargeting",
@@ -10,7 +10,7 @@ bl_info = {
 
 import bpy
 
-from .animation import constrains, mapping, rigify
+from .animation import constrains, mapping, rigify, universal
 from .animation.mapping import (
     is_driver_copy,
     is_org_copy,
@@ -331,6 +331,13 @@ class MOCAPTORIGIFY_PT_mapping(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
 
 
 classes = (
+    universal.props.URT_Row,
+    universal.props.URT_Props,
+    universal.operators.URT_OT_analyze,
+    universal.operators.URT_OT_bind,
+    universal.operators.URT_OT_remove,
+    universal.panel.MOCAPTORIGIFY_PT_universal,
+    universal.panel.MOCAPTORIGIFY_PT_universal_mapping,
     constrains.BONECONSTRAINTS_OT_store,
     constrains.BONECONSTRAINTS_OT_apply,
     constrains.BONECONSTRAINTS_OT_keyframe_influence,
@@ -355,9 +362,13 @@ def register():
     bpy.types.Scene.my_addon_props = bpy.props.PointerProperty(
         type=rigify.MyAddonProperties
     )
+    bpy.types.Scene.universal_retarget = bpy.props.PointerProperty(
+        type=universal.props.URT_Props
+    )
 
 
 def unregister():
+    del bpy.types.Scene.universal_retarget
     del bpy.types.Scene.my_addon_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

@@ -4,6 +4,8 @@ A Blender add-on that binds a **Mocap Fusion** motion-capture rig to a **Rigify*
 
 > **Audience:** This document is written as a technical context brief for AI assistants and contributors taking over the project. It is intentionally dense.
 
+> **New in 1.3.0 — Universal Retarget.** A second, rig-agnostic pipeline now lives in `animation/universal/`: pick any two armatures from dropdowns, press **Analyze** to auto-detect the bone mapping (no typed bone names), review/fix it in a bone-search list, and **Bind**. Rigify-generated targets automatically get the full correction chain (§3 generalized off hardcoded bone names); plain FK rigs get a direct bind. Sections 1–10 below describe the original rigify-specific pipeline, which is unchanged and still registered alongside. See §11 for the universal system.
+
 ---
 
 ## 1. What it does
@@ -210,6 +212,39 @@ How the pipeline configures spaces (useful when debugging jitter or wrong orient
 | *-copy → original Rigify (control bones) | `COPY_ROTATION` | `LOCAL` | `LOCAL` | `mix_mode = 'AFTER'`, so your own keys layer on top. |
 | *-copy → original Rigify (IK bones) | `COPY_LOCATION` | `LOCAL_WITH_PARENT` | `LOCAL_WITH_PARENT` | `use_offset = True`. |
 | Spine_fk → copy-org-mch spine | `COPY_ROTATION` | default | default | Paired by `head_local`/`tail_local` touching within 0.0001. |
+
+---
+
+## 11. Universal Retarget (1.3.0)
+
+`animation/universal/` — any rig → any rig, mapping detected instead of typed. Same philosophy as the original pipeline (rotation-only, hips location, non-destructive correction), generalized past hardcoded Rigify names.
+
+### Modules
+
+| Module | Role |
+|--------|------|
+| `analysis.py` | Rig classification (`RIGIFY` when ORG-+MCH- mechanic bones exist, else `GENERIC`), control-bone detection, MCH IK-parent detection, the positional `walk_spine`. |
+| `matching.py` | Slot detection on any rig (synonym names → ORG-prefix-stripped names → topology fallback) and the anchor-based torso pairing that spreads one rig's spine over the other's. Produces the mapping rows. |
+| `binding.py` | The constraint core, ported verbatim from the original pipeline: `RTG-*` proxies, Child-Of with the mocap rest inverse, Copy Rotation, the hips `TRANSFORM` gain. Constraint suffix `-urt`. |
+| `chain.py` | The correction layer. **Chain mode** (rigify-like targets): builds `<target>-URT-org` (driven bones + MCH IK parents, separated out) and `<target>-URT-driver` (full duplicate whose MCH parents / spine FK controls / neck+head controls follow the org copy), then binds every original control with `LOCAL/LOCAL AFTER` and the IK controls with `LOCAL_WITH_PARENT` + location offset. **Direct mode** (everything else): proxies and constraints straight on the target's bones. |
+| `props.py` / `operators.py` / `panel.py` | Scene state (`scene.universal_retarget`), the Analyze / Bind / Remove Setup operators, and the "Universal Retarget" N-panel. |
+
+### What Analyze does
+
+1. Detects the 22 canonical slots on **both** rigs (shared synonym table + structural fallback). On rigify-like targets an ORG- twin beats a same-named control.
+2. Builds the target torso chain with a positional, direction-filtered walk (the ORG bones parent to tweak controls, not to each other; and `ORG-shoulder.L` starts exactly on `ORG-spine.003`'s tail, so "most descendants" walks into the arm — direction alignment does not).
+3. Pairs the chains around three anchors (hips, the bone the shoulders hang off, head). Target torso bones the capture lacks (a long anime upper chest vs a single UpperChest joint) follow the anchor's rotation; slot-labeled rows come from the distribution.
+4. On rigs without ORG neck/head twins (Ochako-style featuresets), the neck/head **controls** become driven bones directly.
+
+### Notes for the generic path
+
+- The hips bone of a BVH rig is a root stub that may point downward; the walk's first hop relaxes the direction rule and takes the most upward continuation.
+- Direct mode assumes a target at rest. A target with baked pose location on its hips will double the hips travel (the `TRANSFORM` adds on top); use a clean rig or the Remove button first.
+- Bind auto-switches a source parked in armature *Rest Position* display back to *Pose* — otherwise every constraint targeting it reads a constant and the retarget appears frozen.
+
+### Verified against
+
+Ochako-Rig (Rigify-generated, 532 bones, no ORG-neck/ORG-head, skirt/penis/face extras) ← BVH-style `mocap` rig (54 bones, object scale 1.116, 120-frame action): 23 pairs detected unattended, auto hip gain 5.824 (armature-unit rest-height ratio — object-scale independent), frame-1 normalized pose error −0.001, re-bind idempotent, Remove restores the scene exactly. Direct mode verified on a stripped duplicate (hips delta 0.0 at all frames).
 
 ---
 
