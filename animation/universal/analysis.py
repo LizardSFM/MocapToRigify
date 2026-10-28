@@ -24,6 +24,38 @@ INTERNAL_PREFIXES = (ORG_PREFIX, MCH_PREFIX, DEF_PREFIX)
 NOISE_PREFIXES = ("VIS_", "WGT-")
 
 _TRAILING_NUMBER = re.compile(r"\.(\d+)$")
+_CAMEL_CASE = re.compile(r"(?<=[a-z])([A-Z])")
+_BARE_NUMBER = re.compile(r"(?<=[a-zA-Z])(\d+)$")
+
+
+def normalize_name(name):
+    """Name folding for slot matching: CamelCase split apart, a bare
+    trailing number dropped, then the shared normalize().
+
+    `Spine0` and `Spine2` fold to `spine` (the shared normalize only
+    strips dot-separated `.001` suffixes), `UpperArm_L` folds to
+    `upperarml`, `LeftHand` stays `lefthand`.
+    """
+    text = _CAMEL_CASE.sub(r"_\1", name)
+    text = _BARE_NUMBER.sub("", text)
+    return mapping.normalize(text)
+
+
+def deform_bones(rig):
+    """Names of the rig's bones that actually skin the meshes: the vertex
+    group names of every mesh deformed by this armature. The objective
+    'bones that matter' set -- IK helpers, jiggle bones and widgets never
+    appear in it."""
+    names = set()
+    for obj in bpy.data.objects:
+        if obj.type != "MESH":
+            continue
+        skinned = any(m.type == "ARMATURE" and m.object == rig for m in obj.modifiers)
+        if not skinned and obj.parent != rig:
+            continue
+        for group in obj.vertex_groups:
+            names.add(group.name)
+    return {name for name in names if name in rig.data.bones.keys()}
 
 # Bones whose world head/tail must line up this exactly to count as
 # "the chain continues through here".
@@ -117,6 +149,22 @@ def continuing_children(bone, keep):
         if (child.head_local - bone.tail_local).length < POSITION_EPS:
             out.append(child)
     return out
+
+
+def continuing_child(bone, keep):
+    """The child that carries this bone's chain on: starts on its tail and
+    points closest to the parent's own direction."""
+    best = None
+    best_dot = -2.0
+    parent_dir = direction(bone)
+    for child in continuing_children(bone, keep):
+        dot = direction(child).dot(parent_dir)
+        if dot > best_dot:
+            best_dot = dot
+            best = child
+    if best is not None and best_dot <= 0:
+        return None
+    return best
 
 
 def walk_spine(start, keep, stop=(), max_length=64):

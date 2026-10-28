@@ -5,6 +5,8 @@
 
 import bpy
 
+from . import adapters
+
 
 def _armature_poll(self, obj):
     return obj is not None and obj.type == "ARMATURE"
@@ -43,17 +45,7 @@ class URT_Props(bpy.types.PropertyGroup):
     )
     mode: bpy.props.EnumProperty(
         name="Binding Mode",
-        items=(
-            ("AUTO", "Auto",
-             "Rigify chain when the target looks Rigify-generated, direct constraints otherwise"),
-            ("CHAIN", "Rigify Chain",
-             "Three-copy chain: an ORG copy follows the mocap, a driver copy runs the rig's "
-             "own mechanics, the original follows the driver -- corrections stay possible "
-             "on top of the motion"),
-            ("DIRECT", "Direct",
-             "Constraints straight on the target's bones; correct per bone with Keyframe "
-             "Influence / Bake. Best for plain FK rigs"),
-        ),
+        items=adapters.enum_items(),
         default="AUTO",
     )
     auto_hip_scale: bpy.props.BoolProperty(

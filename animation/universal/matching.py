@@ -7,12 +7,18 @@
 # branching, legs as the downward chains off the hips, the spine by the
 # positional walk in analysis.walk_spine.
 #
+# Then verify_and_repair() trusts structure over names: conventions
+# disagree about what a word means (Source Filmmaker rigs call the upper
+# arm 'Shoulder', the calf 'Knee' and the foot 'Shin'), but nobody's
+# thigh connects to anything but their shin. Limb slots are re-read off
+# the positional chains and the hips off the legs' common ancestor.
+#
 # The pairing then spreads one rig's torso over the other's around three
 # anchors (hips, the bone the shoulders hang off, the head), which is what
 # makes a 7-bone spine follow a 4-bone capture without any typed names.
 
 from .. import mapping
-from ..mapping import MOCAP_SYNONYMS, SLOTS, normalize
+from ..mapping import MOCAP_SYNONYMS, SLOTS
 from . import analysis
 
 CONF_ORG = 3        # matched an ORG- bone of a rigify-like target
@@ -32,6 +38,11 @@ SWING_SLOTS = (
     "thigh_r", "shin_r", "foot_r",
 )
 
+# Slots whose proxy takes the mocap bone's full rest frame (direction and
+# roll). The limbs, and the neck/head: a wrong roll rotates the plane the
+# child bends in, and head bones never carry the hips' flip risk.
+ALIGNED_SLOTS = SWING_SLOTS + ("neck", "head")
+
 LIMB_SLOT_ORDER = (
     ("shoulder_l", "shoulder_r"),
     ("upper_arm_l", "upper_arm_r"),
@@ -45,22 +56,29 @@ LIMB_SLOT_ORDER = (
 REQUIRED_SLOTS = ("hips", "head", "hand_l", "hand_r", "foot_l", "foot_r")
 
 
-def detect_slots(obj, prefer_org=False):
+def detect_slots(obj, prefer_org=False, deform=None):
     """{slot: (bone_name, confidence)} for this armature.
 
     `prefer_org` should be set for rigify-like targets: an ORG- twin beats
     the same-named control, because the ORG bone is where mocap rotation
     has to land for the rig's own mechanics to carry it out to the
-    controls.
+    controls. `deform` is the vertex-group deform bone set; when several
+    bones share a name, a deform bone wins.
     """
     bones = obj.data.bones
     exact = {}
     org = {}
     for bone in bones:
-        exact.setdefault(normalize(bone.name), []).append(bone.name)
+        exact.setdefault(analysis.normalize_name(bone.name), []).append(bone.name)
         if bone.name.startswith(analysis.ORG_PREFIX):
-            stripped = normalize(bone.name[len(analysis.ORG_PREFIX):])
+            stripped = analysis.normalize_name(bone.name[len(analysis.ORG_PREFIX):])
             org.setdefault(stripped, []).append(bone.name)
+
+    def pick(candidates):
+        for name in candidates:
+            if deform and name in deform:
+                return name
+        return candidates[0]
 
     resolved = {}
     used = set()
@@ -79,11 +97,11 @@ def detect_slots(obj, prefer_org=False):
         if prefer_org:
             for synonym in synonyms:
                 if synonym in org:
-                    if claim(slot, org[synonym][0], CONF_ORG):
+                    if claim(slot, pick(org[synonym]), CONF_ORG):
                         break
         for synonym in synonyms:
             if synonym in exact:
-                if claim(slot, exact[synonym][0], CONF_NAME):
+                if claim(slot, pick(exact[synonym]), CONF_NAME):
                     break
 
     # Structural torso recovery (hips found, some spine slots not): walk
@@ -93,11 +111,121 @@ def detect_slots(obj, prefer_org=False):
     for slot, name in plain.items():
         claim(slot, name, CONF_STRUCTURAL)
 
-    _structural_fill(obj, resolved)
+    _structural_fill(obj, resolved, deform)
     return resolved
 
 
-def _structural_fill(obj, resolved):
+# ------------------------------------------------- structural verification
+
+def _keep_for(rig, deform):
+    """Which bones the repair walks may pass through: the ORG layer on
+    rigify-like rigs, the deform skeleton anywhere else, and never the
+    IK-target / jiggle helpers."""
+    if analysis.classify(rig) == analysis.FLAVOR_RIGIFY:
+        return lambda b: b.name.startswith(analysis.ORG_PREFIX)
+    def keep(bone):
+        if deform is not None and bone.name not in deform:
+            return False
+        name = mapping.normalize(bone.name)
+        return not any(word in name for word in ("ik", "jiggle", "pole", "widget"))
+    return keep
+
+
+def _common_ancestor(bones):
+    if not bones:
+        return None
+    chains = []
+    for bone in bones:
+        chain = []
+        current = bone.parent
+        while current is not None:
+            chain.append(current)
+            current = current.parent
+        chains.append(chain)
+    shortest = min(chains, key=len)
+    for candidate in shortest:
+        if all(candidate in chain for chain in chains):
+            return candidate
+    return None
+
+
+def verify_and_repair(rig, slots, deform=None):
+    """Re-read the limb and hips slots off the bone hierarchy, in place.
+
+    Name conventions lie; topology does not. The forearm's parent is the
+    upper arm whatever anybody calls it, the thigh's continuing child is
+    the shin, and the bone both thighs descend from is the hips -- even
+    when a bone *named* Pelvis is just a side deform bone (Source
+    Filmmaker rigs). Only slots whose name match contradicts the chain
+    move, and those drop to structural confidence.
+    """
+    bones = rig.data.bones
+    keep = _keep_for(rig, deform)
+
+    def bone_of(slot):
+        entry = slots.get(slot)
+        return bones.get(entry[0]) if entry else None
+
+    def set_slot(slot, bone, confidence=CONF_STRUCTURAL):
+        current = slots.get(slot)
+        if current and current[0] == bone.name:
+            return
+        slots[slot] = (bone.name, confidence)
+
+    # Legs: the thigh's positional chain *is* thigh/shin/foot, in order.
+    for side in ("l", "r"):
+        thigh = bone_of(f"thigh_{side}")
+        if thigh is None:
+            continue
+        chain = analysis.walk_spine(thigh, keep)
+        for index, slot in enumerate(("thigh", "shin", "foot")):
+            if index < len(chain):
+                set_slot(f"{slot}_{side}", chain[index])
+
+    # Hips: the common ancestor of both thighs, as long as the spine
+    # actually continues upward from there; otherwise climb the ancestors
+    # until it does.
+    thighs = [bone_of("thigh_l"), bone_of("thigh_r")]
+    thighs = [t for t in thighs if t is not None]
+    hips = bone_of("hips")
+    head = bone_of("head")
+    if thighs:
+        candidate = _common_ancestor(thighs) or hips
+        for _ in range(4):
+            if candidate is None:
+                break
+            chain = analysis.walk_spine(candidate, keep)
+            reaches_head = head is not None and any(b.name == head.name for b in chain)
+            if len(chain) >= 3 or reaches_head:
+                if hips is None or hips.name != candidate.name:
+                    set_slot("hips", candidate)
+                break
+            candidate = candidate.parent
+
+    # Arms: anchor on the forearm -- the most honestly named bone on any
+    # rig. Its parent is the upper arm, its continuing child the hand,
+    # and the upper arm's parent the shoulder.
+    for side in ("l", "r"):
+        forearm = bone_of(f"forearm_{side}")
+        if forearm is None:
+            continue
+        upper = forearm.parent
+        while upper is not None and not keep(upper):
+            upper = upper.parent
+        if upper is not None:
+            set_slot(f"upper_arm_{side}", upper)
+            hand = analysis.continuing_child(forearm, keep)
+            if hand is not None:
+                set_slot(f"hand_{side}", hand)
+            clavicle = upper.parent
+            while clavicle is not None and not keep(clavicle):
+                clavicle = clavicle.parent
+            if clavicle is not None:
+                set_slot(f"shoulder_{side}", clavicle)
+    return slots
+
+
+def _structural_fill(obj, resolved, deform=None):
     """Best-effort topology recovery for slots the names did not give us."""
     bones = obj.data.bones
     if not bones:
@@ -125,8 +253,13 @@ def _structural_fill(obj, resolved):
         return
 
     def keep(bone):
-        return not bone.name.startswith((analysis.MCH_PREFIX, analysis.DEF_PREFIX,
-                                         *analysis.NOISE_PREFIXES))
+        if deform is not None and bone.name not in deform:
+            return False
+        if bone.name.startswith((analysis.MCH_PREFIX, analysis.DEF_PREFIX,
+                                 *analysis.NOISE_PREFIXES)):
+            return False
+        name = mapping.normalize(bone.name)
+        return not any(word in name for word in ("ik", "jiggle", "pole", "widget"))
 
     # Legs: downward children of the hips, split by side. +X is the
     # character's left in Blender convention.

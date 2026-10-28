@@ -1,8 +1,9 @@
 # Universal retargeting: any rig -> any rig, mapping detected instead of
-# typed. See analysis/matching/binding/chain for the layers; props holds
-# the scene state, operators and panel the user surface.
+# typed. The core (analysis/matching/binding/chain) is rig-agnostic; the
+# adapters/ package holds one strategy per rig family. Props holds the
+# scene state, operators and panel the user surface.
 
-from . import analysis, binding, chain, matching, operators, panel, props
+from . import adapters, analysis, binding, chain, matching, operators, panel, props
 
 classes = (
     props.URT_Row,

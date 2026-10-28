@@ -217,24 +217,29 @@ How the pipeline configures spaces (useful when debugging jitter or wrong orient
 
 ## 11. Universal Retarget (1.3.0)
 
-`animation/universal/` — any rig → any rig, mapping detected instead of typed. Same philosophy as the original pipeline (rotation-only, hips location, non-destructive correction), generalized past hardcoded Rigify names.
+`animation/universal/` — any rig → any rig, mapping detected instead of typed. Same philosophy as the original pipeline (rotation-only, hips location, non-destructive correction), generalized past hardcoded Rigify names. Since v2 the target-specific behaviour lives in **adapters** (below); the core (detection, matching, constraint math) is rig-agnostic.
 
 ### Modules
 
 | Module | Role |
 |--------|------|
-| `analysis.py` | Rig classification (`RIGIFY` when ORG-+MCH- mechanic bones exist, else `GENERIC`), control-bone detection, MCH IK-parent detection, the positional `walk_spine`. |
-| `matching.py` | Slot detection on any rig (synonym names → ORG-prefix-stripped names → topology fallback) and the anchor-based torso pairing that spreads one rig's spine over the other's. Produces the mapping rows. |
-| `binding.py` | The constraint core, ported verbatim from the original pipeline: `RTG-*` proxies, Child-Of with the mocap rest inverse, Copy Rotation, the hips `TRANSFORM` gain. Constraint suffix `-urt`. |
-| `chain.py` | The correction layer. **Chain mode** (rigify-like targets): builds `<target>-URT-org` (driven bones + MCH IK parents, separated out) and `<target>-URT-driver` (full duplicate whose MCH parents / spine FK controls / neck+head controls follow the org copy), then binds every original control with `LOCAL/LOCAL AFTER` and the IK controls with `LOCAL_WITH_PARENT` + location offset. **Direct mode** (everything else): proxies and constraints straight on the target's bones. |
-| `props.py` / `operators.py` / `panel.py` | Scene state (`scene.universal_retarget`), the Analyze / Bind / Remove Setup operators, and the "Universal Retarget" N-panel. |
+| `analysis.py` | Rig classification (`RIGIFY` when ORG-+MCH- mechanic bones exist, else `GENERIC`), CamelCase-aware name normalization (`UpperArm_L` → `upper arm l`, bare trailing digits stripped so Source-style `Spine0`–`Spine3` still name-match), control-bone detection, MCH IK-parent detection, **`deform_bones()`** — the objective "bones that matter" set read from the vertex groups of armature-modified meshes — and the positional `walk_spine`. |
+| `matching.py` | Slot detection v2: synonym names → deform-set preference → structural fallback, then `verify_and_repair` — a topology pass that re-reads legs as "the thigh chain descending from each side of the hips", re-anchors arms on *forearm.parent = upper arm, forearm's continuing child = hand*, and re-derives hips as the common ancestor of both thighs. This is what decoded the Source/SFM naming on the Crusader rig, where `Shoulder.L` is an upper arm, `Hip.L` a thigh and `Pelvis` a side deform bone — pure name matching cannot. Produces the mapping rows; the rows UI stays the manual safety net. |
+| `binding.py` | The constraint core, ported verbatim from the original pipeline: `RTG-*` proxies, Child-Of with the mocap rest inverse, Copy Rotation. Limb/neck/head proxies take the mocap bone's **full rest frame** — direction *and* roll, the roll solved by closed-loop candidate search with read-back comparison — so the driven bone's world orientation equals the mocap bone's outright. Wrong rolls don't show on a straight limb but rotate the plane the child bends in (elbows/knees folding twisted); swing-only alignment is only right when both rigs share a twist convention, which a Source port against BVH does not. The hips `TRANSFORM` maps **world→world, rest-anchored on both sides** (`out = target_rest + gain × (in − mocap_rest)`), so no hips-bone orientation can skew the travel. Constraint suffix `-urt`. |
+| `adapters/` | The adapter registry (`base.py` defines `RigAdapter`: `detect(rig) → confidence`, `build(...) → summary`). `RigifyChainAdapter` (detects ORG-+MCH-), `FKChainAdapter` (any humanoid skeleton), `DirectAdapter` (last resort). The panel's mode dropdown lists them plus **Auto**, which picks the highest-confidence adapter. Adding a rig family later = one new file in `adapters/`, nothing else changes. |
+| `chain.py` | Shared correction-layer machinery: the verified `duplicate_rig` (raises unless it got a *new* object back), the org-copy builder from an **exact copy of the target's armature datablock with the non-driven bones deleted** — no duplication or separation of the user's rig (a mid-operator failure can never damage it), and no bone reconstruction either: recreating bones from head/tail/roll is a trap, `align_roll()` degenerates when a bone's rest Z runs along its length (hips, thighs) and returns 180°-off rolls that ride the world-space Copy Rotations out as a backwards pelvis. Also `make_driver_skeleton` and the role-tagged `remove_setup` every adapter reuses. |
+| `adapters/rigify.py` | **Rigify Chain**: org copy (driven ORG bones + MCH IK parents) → driver duplicate whose MCH parents / spine FK controls / neck+head controls / **limb FK controls** follow the org copy → every original control binds `LOCAL/LOCAL AFTER`, IK controls `LOCAL_WITH_PARENT` + location offset. Driving the limb FK controls matters twice over: the FK layer no longer dangles at rest with ghost hands sticking out past the shoulders, and switching a limb to FK mid-shot keeps the captured pose instead of snapping to rest. |
+| `adapters/fk_chain.py` | **FK Chain** — the same three-copy correction chain for plain-FK rigs (metarigs used as final rigs, Mixamo, game-skeleton exports): org copy carries the mocap via proxies; the driver's same-name bones Copy-Rotate (world) off the org copy plus the hips `TRANSFORM`; then *every* original bone that exists in the driver gets `COPY_ROTATION LOCAL/LOCAL mix AFTER` ← driver, hips also `TRANSFORM`. Your keys layer on top of the mocap exactly like on Rigify; Keyframe Influence / Bake work unchanged. The rig's own **IK constraints are muted while bound** (recorded, restored by Remove): an IK is a chain solver that rewrites its whole chain's rotations — forearm IK owns the upper arm too — so it cannot layer with the AFTER-mix copy and instead fought it, leaving limbs 50–220° off while torso and head stayed exact. |
+| `adapters/direct.py` | **Direct**: proxies and constraints straight on the target's bones. No helper rigs, no correction layer. |
+| `props.py` / `operators.py` / `panel.py` | Scene state (`scene.universal_retarget`), the Analyze / Bind / Remove Setup operators, and the "Universal Retarget" N-panel. Analyze reports the auto-picked adapter, the deform-bone coverage and any repaired slots in its status line. |
 
 ### What Analyze does
 
-1. Detects the 22 canonical slots on **both** rigs (shared synonym table + structural fallback). On rigify-like targets an ORG- twin beats a same-named control.
-2. Builds the target torso chain with a positional, direction-filtered walk (the ORG bones parent to tweak controls, not to each other; and `ORG-shoulder.L` starts exactly on `ORG-spine.003`'s tail, so "most descendants" walks into the arm — direction alignment does not).
-3. Pairs the chains around three anchors (hips, the bone the shoulders hang off, head). Target torso bones the capture lacks (a long anime upper chest vs a single UpperChest joint) follow the anchor's rotation; slot-labeled rows come from the distribution.
-4. On rigs without ORG neck/head twins (Ochako-style featuresets), the neck/head **controls** become driven bones directly.
+1. Reads the target's deform set from mesh vertex groups (when meshes carry an armature modifier) and detects the 22 canonical slots on **both** rigs (shared synonym table + deform preference + structural fallback), then runs the structural verify-and-repair pass. On rigify-like targets an ORG- twin beats a same-named control.
+2. Picks the adapter (reported in the status line; override with the mode dropdown).
+3. Builds the target torso chain with a positional, direction-filtered walk (the ORG bones parent to tweak controls, not to each other; and `ORG-shoulder.L` starts exactly on `ORG-spine.003`'s tail, so "most descendants" walks into the arm — direction alignment does not).
+4. Pairs the chains around three anchors (hips, the bone the shoulders hang off, head). Target torso bones the capture lacks (a long anime upper chest vs a single UpperChest joint) follow the anchor's rotation; slot-labeled rows come from the distribution.
+5. On rigs without ORG neck/head twins (Ochako-style featuresets), the neck/head **controls** become driven bones directly.
 
 ### Notes for the generic path
 
@@ -244,7 +249,19 @@ How the pipeline configures spaces (useful when debugging jitter or wrong orient
 
 ### Verified against
 
-Ochako-Rig (Rigify-generated, 532 bones, no ORG-neck/ORG-head, skirt/penis/face extras) ← BVH-style `mocap` rig (54 bones, object scale 1.116, 120-frame action): 23 pairs detected unattended, auto hip gain 5.824 (armature-unit rest-height ratio — object-scale independent), frame-1 normalized pose error −0.001, re-bind idempotent, Remove restores the scene exactly. Direct mode verified on a stripped duplicate (hips delta 0.0 at all frames).
+**Ochako-Rig** (Rigify-generated, 532 bones, no ORG-neck/ORG-head, skirt/penis/face extras) ← BVH-style `mocap` rig (54 bones, object scale 1.116, 120-frame action), Rigify Chain adapter: 23 pairs detected unattended, auto hip gain 5.22 (world rest-height ratio), hips travel maps with **zero** world error at every frame, all 14 limb FK controls paired to their exact ORG bones, frame-1 normalized pose error −0.001, re-bind idempotent, Remove restores the scene exactly. Direct mode verified on a stripped duplicate (hips delta 0.0 at all frames).
+
+**Crusader Rig** (Source/SFM-style port, 161 bones, 148 deform bones, plain FK plus four baked-in limb IK constraints) ← the same `mocap` rig, FK Chain adapter: all 20 slots auto-detected after the structural repair decoded the SFM naming (`Shoulder.L`=upper arm, `Hip.L`=thigh, `Pelvis`=side bone), **0.0°** world-orientation error through the *entire* chain — mocap → org copy → driver → the user's own rig — on shoulders, forearms, hands, thighs, knees, shins, feet, spine, neck and head at frames 1/30/60/90; hips travel exactly proportional (12,371mm vs the capture's 278.5mm = the 44.4 rest-height gain to 0.05%); bind→rebind→remove→bind idempotent with the rig's IK muted while bound and fully restored by Remove. The frame-60 render shows a natural animated stance — no frozen limbs, no twisted bend planes, feet planted.
+
+### Honest boundaries
+
+- Rotation-only transfer cannot reproduce positions when skeleton proportions differ (a capture with proportionally longer limbs lands its hands wider than a stockier target). The AFTER-mix correction layer is the intended fix — that is the addon's whole workflow.
+- Rigs with heavy mechanics (Auto-Rig Pro, facial wire rigs, non-humanoids) need a dedicated adapter; the registry is the extension point.
+- A target whose hips carry baked pose location will double the hips travel (the `TRANSFORM` adds on top); use a clean rig or the Remove button first.
+
+### Notes on the remaining ~1% hips offset
+
+The original rig's own ORG-spine can sit ~0.13 units (≈1% of height) off the org copy's hips once the spine bends: the original reconstructs its pelvis through the MCH-spine chain from the torso control down, and chain-geometry differences accumulate. The mapping itself is exact (the org copy's ORG-spine lands with 0.000 error); this residue is rigify-internal and is what the non-destructive hips correction keys are for.
 
 ---
 

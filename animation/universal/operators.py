@@ -1,9 +1,9 @@
-# Operators: Analyze (detect + fill the mapping rows), Bind (run the
-# chosen correction mode), Remove Setup (full cleanup).
+# Operators: Analyze (detect + verify + fill the mapping rows), Bind (the
+# chosen adapter runs), Remove Setup (shared cleanup).
 
 import bpy
 
-from . import analysis, binding, chain, matching
+from . import adapters, analysis, binding, chain, matching
 
 
 def _props(context):
@@ -30,8 +30,12 @@ class URT_OT_analyze(bpy.types.Operator):
         source, target = props.source, props.target
 
         flavor = analysis.classify(target)
+        deform = analysis.deform_bones(target)
         source_slots = matching.detect_slots(source)
-        target_slots = matching.detect_slots(target, prefer_org=(flavor == analysis.FLAVOR_RIGIFY))
+        matching.verify_and_repair(source, source_slots)
+        target_slots = matching.detect_slots(
+            target, prefer_org=(flavor == analysis.FLAVOR_RIGIFY), deform=deform)
+        matching.verify_and_repair(target, target_slots, deform)
         rows = matching.pair_all(source, target, source_slots, target_slots)
 
         props.rows.clear()
@@ -57,12 +61,14 @@ class URT_OT_analyze(bpy.types.Operator):
                     source, hips.source_bone, target, hips.target_bone
                 )
 
-        source_flavor = analysis.classify(source)
+        adapter = adapters.auto_pick(target)
         bits = [
             f"{len(props.rows)} pairs",
+            f"adapter: {adapter.label}",
             f"target: {flavor.lower()}",
-            f"source: {source_flavor.lower()}",
         ]
+        if deform:
+            bits.append(f"deform bones: {len(deform)}")
         if missing_required:
             bits.append(f"missing required: {', '.join(missing_required)}")
         props.status = " | ".join(bits)
@@ -100,7 +106,10 @@ class URT_OT_bind(bpy.types.Operator):
                        for r in props.rows)
         ]
         if missing:
-            self.report({"ERROR"}, f"Unresolved required slots: {', '.join(missing)}. Run Analyze and fix the mapping.")
+            self.report(
+                {"ERROR"},
+                f"Unresolved required slots: {', '.join(missing)}. "
+                "Run Analyze and fix the mapping.")
             return {"CANCELLED"}
 
         hips = next((r for r in props.rows if r.slot == "hips" and r.enabled), None)
@@ -114,30 +123,33 @@ class URT_OT_bind(bpy.types.Operator):
         if source.data.pose_position == "REST":
             source.data.pose_position = "POSE"
             notes.append(f"{source.name} switched from Rest Position to Pose Position")
+        target_action = target.animation_data.action if target.animation_data else None
+        if target_action is not None:
+            notes.append(
+                f"'{target.name}' has its own action '{target_action.name}': "
+                "its keys layer on top of the mocap")
 
         # A previous bind is always cleaned away first so re-binding
         # replaces instead of stacking.
         chain.remove_setup(context, target)
 
-        mode = props.mode
-        if mode == "AUTO":
-            mode = "CHAIN" if analysis.classify(target) == analysis.FLAVOR_RIGIFY else "DIRECT"
-
+        adapter = adapters.resolve(props.mode, target)
         try:
-            if mode == "CHAIN":
-                summary = chain.bind_chain(context, target, source, props.rows, props.hip_scale)
-            else:
-                summary = chain.bind_direct(context, target, source, props.rows, props.hip_scale)
+            summary = adapter.build(context, target, source, props.rows, props.hip_scale)
         except Exception as exc:  # noqa: BLE001 - surfaced to the user verbatim
             self.report({"ERROR"}, f"Binding failed: {exc}")
             return {"CANCELLED"}
 
         binding.select_objects(context, (target, source), target)
-        message = "Bound {pairs} rotations{hips} ({mode})".format(
+        message = "Bound {pairs} rotations{hips} ({adapter})".format(
             pairs=summary.get("rotation_pairs", 0),
             hips=", hips travel" if summary.get("hips") else "",
-            mode="chain" if mode == "CHAIN" else "direct",
+            adapter=adapter.label,
         )
+        if summary.get("muted_ik"):
+            notes.append(
+                f"{summary['muted_ik']} of the rig's own IK constraints muted "
+                "(they fight the mocap chain; Remove restores them)")
         self.report({"INFO"}, "; ".join([message] + notes))
         return {"FINISHED"}
 
