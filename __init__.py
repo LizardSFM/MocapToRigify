@@ -3,10 +3,13 @@ bl_info = {
     "author": "Liz",
     "version": (1, 3, 0),
     "blender": (5, 0, 0),
-    "location": "View3D > Sidebar > MocapToRigify",
+    "location": "View3D > Sidebar (N) > Lizzy Tools > MocapToRigify",
     "description": "Non-destructive Mocap Fusion to Rigify retargeting",
     "category": "Animation",
 }
+
+# Mark this as a Lizzy Tools addon
+LIZZY_TOOL = True
 
 import bpy
 
@@ -73,12 +76,14 @@ def draw_mapping_group(layout, title, props, fields):
 class MOCAPTORIGIFY_PT_base:
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "MocapToRigify"
+    bl_category = "Lizzy Tools"
 
 
 class MOCAPTORIGIFY_PT_workflow(MOCAPTORIGIFY_PT_base, bpy.types.Panel):
-    bl_label = "Retargeting Workflow"
+    bl_label = "MocapToRigify"
     bl_idname = "MOCAPTORIGIFY_PT_workflow"
+    bl_parent_id = "LIZZY_TOOLS_PT_main"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -357,6 +362,8 @@ classes = (
 
 
 def register():
+    from . import lizzy_hub
+    lizzy_hub.register_hub()
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.my_addon_props = bpy.props.PointerProperty(
@@ -368,10 +375,12 @@ def register():
 
 
 def unregister():
+    from . import lizzy_hub
     del bpy.types.Scene.universal_retarget
     del bpy.types.Scene.my_addon_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    lizzy_hub.unregister_hub()
 
 
 if __name__ == "main":
